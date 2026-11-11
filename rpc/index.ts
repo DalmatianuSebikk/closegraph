@@ -1,7 +1,7 @@
 /**
  * Typed RPC contract between the TUI part and the server part (plan 3 Task 2).
- * Plain JSON Schemas keep this dependency-free; payload types below are the
- * compile-time contract the TUI codes against.
+ * Plain JSON Schemas keep this runtime-dependency-free (type-only imports);
+ * payload types below are the compile-time contract the TUI codes against.
  */
 import { Rpc } from "@opencode/plugin";
 import type { GraphNode } from "../src/graph/types.js";
@@ -40,7 +40,7 @@ export interface NodeDetail {
   risk: { bucket: RiskBucket; because: string[] };
 }
 
-export interface NotFoundPayload {
+export interface NotFoundPayload extends Provenance {
   error: "not-found";
   suggestions: string[];     // qualifiedNames worth retrying
 }
@@ -58,7 +58,7 @@ export interface PaletteMatch {
 export type FilesPayload = (Provenance & { files: FileSummary[] }) | UnavailablePayload;
 export type FileSymbolsPayload = (Provenance & { symbols: SymbolSummary[] }) | UnavailablePayload;
 export type NodeDetailPayload = (Provenance & NodeDetail) | NotFoundPayload | UnavailablePayload;
-export type PaletteSearchPayload = { matches: PaletteMatch[] } | UnavailablePayload;
+export type PaletteSearchPayload = (Provenance & { matches: PaletteMatch[] }) | UnavailablePayload;
 
 const object = { type: "object" } as const;
 

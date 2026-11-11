@@ -106,6 +106,11 @@ function kindOf(handle: GraphHandle, ref: string): string {
   return "unknown";
 }
 
+/** Code-unit ordering (no localeCompare) — same-graph ⇒ same output on every machine, matching the view modules. */
+function byQualifiedName(a: { qualifiedName: string }, b: { qualifiedName: string }): number {
+  return a.qualifiedName < b.qualifiedName ? -1 : a.qualifiedName > b.qualifiedName ? 1 : 0;
+}
+
 export function createRpcHandlers(service: GraphService): {
   files: Handler<FilesPayload>;
   fileSymbols: Handler<FileSymbolsPayload>;
@@ -128,7 +133,7 @@ export function createRpcHandlers(service: GraphService): {
         files: handle.store
           .allNodes()
           .filter((n) => n.kind === "File")
-          .sort((a, b) => a.qualifiedName.localeCompare(b.qualifiedName))
+          .sort(byQualifiedName)
           .map((file) => fileSummary(handle, file)),
       }));
     },
@@ -140,7 +145,7 @@ export function createRpcHandlers(service: GraphService): {
         const symbols = handle.store
           .nodesOfFile(file.id)
           .filter((n) => n.kind === "Function" || n.kind === "Class")
-          .sort((a, b) => a.qualifiedName.localeCompare(b.qualifiedName))
+          .sort(byQualifiedName)
           .map((n) => symbolSummary(handle, n));
         return { ...provenance(handle), symbols };
       });
@@ -150,7 +155,11 @@ export function createRpcHandlers(service: GraphService): {
       return guard((handle) => {
         const resolution = resolveRef(handle, stringField(input, "ref"));
         if (resolution.node === undefined) {
-          return { error: "not-found", suggestions: resolution.candidates.map((n) => n.qualifiedName) };
+          return {
+            ...provenance(handle),
+            error: "not-found",
+            suggestions: resolution.candidates.map((n) => n.qualifiedName),
+          };
         }
         const node = resolution.node;
         const facts = factsFor(handle, node);
@@ -168,6 +177,7 @@ export function createRpcHandlers(service: GraphService): {
 
     async paletteSearch(input, _ctx) {
       return guard((handle) => ({
+        ...provenance(handle),
         matches: paletteFor(handle)
           .search(stringField(input, "prefix"), optionalNumberField(input, "limit") ?? 20)
           .map((m) => ({ ref: m.ref, kind: kindOf(handle, m.ref) })),
