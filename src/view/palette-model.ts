@@ -7,7 +7,7 @@
  * jump target. Out-of-order responses are guarded by a sequence token (R5 pattern).
  */
 import type { PaletteSearchPayload } from "../../rpc/index.js";
-import { bannerNone, bannerUnavailable, type Banner } from "./banner.js";
+import { bannerNone, bannerUnavailable, bannerUnknownFreshness, type Banner } from "./banner.js";
 
 export interface PaletteRow {
   ref: string;
@@ -25,12 +25,14 @@ export interface PaletteState {
 
 export const PALETTE_ACTIONS = ["up", "down", "select", "backspace", "close"] as const;
 export type PaletteAction = (typeof PALETTE_ACTIONS)[number];
+/** Movement is arrows-ONLY: j/k are filter characters, not navigation (fix Important 3).
+ *  Bare ESC is invisible to mock keys (spike D6) — ctrl-c is the alternate close. */
 export const PALETTE_KEYMAP: Record<PaletteAction, readonly string[]> = {
-  up: ["up", "k"],
-  down: ["down", "j"],
+  up: ["up"],
+  down: ["down"],
   select: ["enter", "return"],
   backspace: ["backspace"],
-  close: ["escape", "esc"],
+  close: ["escape", "esc", "ctrl-c"],
 };
 
 /** Matches requested per search; the overlay renders at most this many rows. */
@@ -61,7 +63,9 @@ export function createPaletteModel(deps: {
         applyFailure(payload.message);
         return;
       }
-      banner = bannerNone();
+      // Ruling 13: the palette replaces the underlying view, so it must carry the
+      // staleness banner itself — never silently drop it while open.
+      banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
       matches = payload.matches.map((m) => ({ ref: m.ref, kind: m.kind }));
       cursor = 0;
     } catch (err) {

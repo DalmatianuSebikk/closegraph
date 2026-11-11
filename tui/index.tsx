@@ -2,9 +2,9 @@ import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createSignal, onMount } from "solid-js"
 import { createFileMapModel, RISK_SHADING, type FileMapState } from "../src/view/file-map-model.js"
-import { createSymbolViewModel, type SymbolViewState } from "../src/view/symbol-view-model.js"
-import { createDetailModel, type DetailState } from "../src/view/detail-model.js"
-import { createPaletteModel, type PaletteState } from "../src/view/palette-model.js"
+import { createSymbolViewModel, SYMBOL_VIEW_KEYMAP, type SymbolViewState } from "../src/view/symbol-view-model.js"
+import { createDetailModel, DETAIL_KEYMAP, type DetailState } from "../src/view/detail-model.js"
+import { createPaletteModel, PALETTE_KEYMAP, type PaletteState } from "../src/view/palette-model.js"
 import type {
   FilesPayload,
   FileSymbolsPayload,
@@ -85,8 +85,9 @@ const BANNER_FG: Record<"none" | "unknown-freshness" | "unavailable", string | u
 }
 
 /** marker string → bucket: the EXACT inverse of RISK_SHADING. An unmapped marker
- *  (e.g. a future "!!") throws instead of silently rendering as low (review R2). */
-function markerBucket(marker: string): keyof typeof RISK_SHADING {
+ *  (e.g. a future "!!") renders unmarked with a ONE-TIME dev warning — never a render crash. */
+let warnedMarkers: Set<string> | undefined
+export function markerBucket(marker: string): keyof typeof RISK_SHADING {
   switch (marker) {
     case RISK_SHADING.high.marker: // "!!!"
       return "high"
@@ -95,7 +96,12 @@ function markerBucket(marker: string): keyof typeof RISK_SHADING {
     case RISK_SHADING.low.marker: // ""
       return "low"
     default:
-      throw new Error(`[closegraph] no risk bucket for marker ${JSON.stringify(marker)}`)
+      if (warnedMarkers === undefined) warnedMarkers = new Set()
+      if (!warnedMarkers.has(marker)) {
+        warnedMarkers.add(marker)
+        console.warn(`[closegraph] unknown risk marker ${JSON.stringify(marker)} — rendering unmarked`)
+      }
+      return "low" // low has no marker and no bg: renders unmarked
   }
 }
 
@@ -106,14 +112,55 @@ function printable(key: { sequence?: string; ctrl: boolean; meta: boolean }): st
   return seq.length === 1 && seq >= " " ? seq : undefined
 }
 
-type KeyHandler = (key: { name: string; sequence?: string; ctrl: boolean; meta: boolean; preventDefault: () => void }) => void
+export interface RouteKey {
+  name: string
+  sequence?: string
+  ctrl: boolean
+  meta: boolean
+  preventDefault: () => void
+}
+
+/** One keymap binding → key event. Plain names require NO modifiers; the escape
+ *  family ignores modifiers (bare ESC can parse with meta set — e.g. "\x1b\x1b" —
+ *  and alt/ctrl+escape is still escape); the special "ctrl-c" binding matches
+ *  ctrl+c (a plain "c" stays a printable). */
+export function bindingMatches(binding: string, key: RouteKey): boolean {
+  if (binding === "escape" || binding === "esc") return key.name === "escape" || key.name === "esc"
+  if (binding === "ctrl-c") return key.ctrl && !key.meta && key.name === "c"
+  return !key.ctrl && !key.meta && key.name === binding
+}
+
+/** Keymap record → the action a key event resolves to (undefined = not bound). The route's
+ *  dispatch flows through THIS helper over the models' KEYMAP constants, so the constants
+ *  and the dispatch cannot drift (review minor b). */
+export function actionFor<K extends Record<string, readonly string[]>>(keymap: K, key: RouteKey): (keyof K & string) | undefined {
+  for (const [action, bindings] of Object.entries(keymap) as [keyof K & string, readonly string[]][]) {
+    if (bindings.some((binding) => bindingMatches(binding, key))) return action
+  }
+  return undefined
+}
+
+/** Route-local keymaps: view chrome the pure models don't own. The symbols/detail records
+ *  SPREAD the model KEYMAP exports (single source for model actions) and add route-only
+ *  actions (palette opener, detail refresh). The file map has no model keymap export
+ *  (frozen file), so its record lives here. */
+const MAP_KEYMAP = {
+  up: ["up", "k"],
+  down: ["down", "j"],
+  open: ["enter", "return"],
+  refresh: ["r"],
+  palette: ["p"],
+} as const
+
+const SYMBOLS_KEYMAP = { ...SYMBOL_VIEW_KEYMAP, palette: ["p"] } as const
+const DETAIL_SCREEN_KEYMAP = { ...DETAIL_KEYMAP, refresh: ["r"], palette: ["p"] } as const
 
 interface SymbolsScreen {
   kind: "symbols"
   fileRef: string
   model: ReturnType<typeof createSymbolViewModel>
   state: () => SymbolViewState
-  setState: (s: SymbolViewState) => void
+  sync: () => void
 }
 
 interface DetailScreen {
@@ -121,10 +168,40 @@ interface DetailScreen {
   ref: string
   model: ReturnType<typeof createDetailModel>
   state: () => DetailState
-  setState: (s: DetailState) => void
+  sync: () => void
 }
 
 type Screen = SymbolsScreen | DetailScreen
+
+/** The picking-relevant slice of SessionInfo (id, parentID?, time.updated, location.directory)
+ *  — structurally satisfied by the client type in 2.2.5 and 2.2.7 alike. */
+export interface AskAgentSession {
+  id: string
+  parentID?: string
+  time: { updated: number }
+  location?: { directory: string }
+}
+
+/**
+ * Ask-agent session choice, project-scoped (review Important 4). Pinned from the d.ts of
+ * BOTH @opencode/plugin 2.2.5 (running host) and 2.2.7 (pinned types): LocationRef carries
+ * only { directory, workspaceID? } (2.2.5 types.d.ts:949, 2.2.7 :961 — NO projectID), and
+ * SessionInfo.location is LocationPublicRef { directory } (2.2.5 :560, 2.2.7 :564), so the
+ * only reliable same-project key BOTH versions share is directory equality. Rules:
+ *  - newest-updated ROOT session (parentID undefined — subagent children never picked)
+ *    whose location.directory matches the current directory (trailing-slash tolerant);
+ *  - currentDirectory undefined (context.location absent) or zero matches → undefined ⇒
+ *    the documented degrade path — a foreign project's session is NEVER guessed.
+ */
+export function pickAskAgentSession(sessions: AskAgentSession[], currentDirectory: string | undefined): string | undefined {
+  if (currentDirectory === undefined) return undefined
+  const normalize = (dir: string) => (dir.length > 1 && dir.endsWith("/") ? dir.slice(0, -1) : dir)
+  const here = normalize(currentDirectory)
+  const roots = sessions.filter(
+    (s) => s.parentID === undefined && s.location !== undefined && normalize(s.location.directory) === here,
+  )
+  return roots.sort((a, b) => b.time.updated - a.time.updated).at(0)?.id
+}
 
 /**
  * Ask-agent execution (plan decision 4: inject + navigate). API verified against BOTH
@@ -135,12 +212,10 @@ type Screen = SymbolsScreen | DetailScreen
  */
 async function runAskAgent(context: ReturnType<typeof usePlugin>, prompt: string): Promise<void> {
   const route = context.ui.router.current()
+  // the session visibly open in THIS tui is same-project by construction
   let sessionID = route.type === "session" ? route.sessionID : undefined
   if (sessionID === undefined) {
-    // on the plugin route: the most recently updated root session is "the chat I came from"
-    const roots = context.data.session.list().filter((s) => s.parentID === undefined)
-    const latest = roots.sort((a, b) => b.time.updated - a.time.updated).at(0)
-    sessionID = latest?.id
+    sessionID = pickAskAgentSession(context.data.session.list(), context.location?.directory)
   }
   if (sessionID !== undefined) {
     try {
@@ -152,7 +227,7 @@ async function runAskAgent(context: ReturnType<typeof usePlugin>, prompt: string
     }
   }
   context.ui.dialog.alert({ title: "Ask agent", message: `Paste this prompt in chat:\n\n${prompt}` })
-  context.ui.toast.show({ message: "ask-agent: no session available — prompt shown in dialog", variant: "warning" })
+  context.ui.toast.show({ message: "ask-agent: no session in this project — prompt shown in dialog", variant: "warning" })
 }
 
 function CodeGraphRoute() {
@@ -166,10 +241,7 @@ function CodeGraphRoute() {
 
   const syncMap = () => setMapState(fileMap.state())
   const syncPalette = () => setPaletteState(palette.state())
-  const syncScreen = (screen: Screen) => {
-    if (screen.kind === "symbols") screen.setState(screen.model.state())
-    else screen.setState(screen.model.state())
-  }
+  const syncScreen = (screen: Screen) => screen.sync()
   const top = (): Screen | undefined => screens()[screens().length - 1]
 
   onMount(() => {
@@ -191,14 +263,14 @@ function CodeGraphRoute() {
   function pushSymbols(fileRef: string): void {
     const model = createSymbolViewModel({ fileRef, fileSymbols: fileSymbolsViaRpc(context.client) })
     const [state, setState] = createSignal<SymbolViewState>(model.state())
-    setScreens([...screens(), { kind: "symbols", fileRef, model, state, setState }])
+    setScreens([...screens(), { kind: "symbols", fileRef, model, state, sync: () => setState(model.state()) }])
     void model.load().then(() => setState(model.state()))
   }
 
   function pushDetail(ref: string): void {
     const model = createDetailModel({ ref, nodeDetail: nodeDetailViaRpc(context.client) })
     const [state, setState] = createSignal<DetailState>(model.state())
-    setScreens([...screens(), { kind: "detail", ref, model, state, setState }])
+    setScreens([...screens(), { kind: "detail", ref, model, state, sync: () => setState(model.state()) }])
     void model.load().then(() => setState(model.state()))
   }
 
@@ -209,33 +281,34 @@ function CodeGraphRoute() {
   }
 
   // One route-global keyboard handler with EXPLICIT precedence (review caution from
-  // Task 4): palette (when open) → top screen → file map. Consumed keys preventDefault
-  // so the host keymap does not double-act on them.
+  // Task 4): palette (when open) → top screen → file map. Every branch dispatches
+  // through actionFor() over the KEYMAP constants above/beside the models — the
+  // constants ARE the dispatch, so they cannot drift (review minor b). Consumed
+  // keys preventDefault so the host keymap does not double-act on them.
   useKeyboard((key) => {
     if (palette.state().open) {
-      switch (key.name) {
+      // text-entry overlay: movement is arrows-only; EVERY unmodified printable —
+      // including j and k — types into the filter (review Important 3). ctrl-c is the
+      // D6 alternate close (bare ESC is invisible to mock keys).
+      switch (actionFor(PALETTE_KEYMAP, key)) {
         case "up":
-        case "k":
           key.preventDefault()
           palette.move(-1)
           syncPalette()
           break
         case "down":
-        case "j":
           key.preventDefault()
           palette.move(1)
           syncPalette()
           break
-        case "enter":
-        case "return": {
+        case "select": {
           key.preventDefault()
           const picked = palette.select()
           syncPalette()
           if (picked !== undefined) pushDetail(picked)
           break
         }
-        case "escape":
-        case "esc":
+        case "close":
           key.preventDefault()
           palette.close()
           syncPalette()
@@ -259,31 +332,28 @@ function CodeGraphRoute() {
     const screen = top()
     if (screen === undefined) {
       // file map (opening view)
-      switch (key.name) {
+      switch (actionFor(MAP_KEYMAP, key)) {
         case "up":
-        case "k":
           key.preventDefault()
           fileMap.move(-1)
           syncMap()
           break
         case "down":
-        case "j":
           key.preventDefault()
           fileMap.move(1)
           syncMap()
           break
-        case "enter":
-        case "return": {
+        case "open": {
           key.preventDefault()
           const fileRef = fileMap.openFile()
           if (fileRef !== undefined) pushSymbols(fileRef)
           break
         }
-        case "r":
+        case "refresh":
           key.preventDefault()
           void fileMap.refresh().then(syncMap, syncMap)
           break
-        case "p":
+        case "palette":
           key.preventDefault()
           openPalette()
           break
@@ -294,36 +364,32 @@ function CodeGraphRoute() {
     }
 
     if (screen.kind === "symbols") {
-      switch (key.name) {
+      switch (actionFor(SYMBOLS_KEYMAP, key)) {
         case "up":
-        case "k":
           key.preventDefault()
           screen.model.move(-1)
-          syncScreen(screen)
+          screen.sync()
           break
         case "down":
-        case "j":
           key.preventDefault()
           screen.model.move(1)
-          syncScreen(screen)
+          screen.sync()
           break
-        case "enter":
-        case "return": {
+        case "open": {
           key.preventDefault()
           const ref = screen.model.openSymbol()
           if (ref !== undefined) pushDetail(ref)
           break
         }
-        case "escape":
-        case "esc":
+        case "back":
           key.preventDefault()
           pop()
           break
-        case "r":
+        case "refresh":
           key.preventDefault()
-          void screen.model.refresh().then(() => syncScreen(screen))
+          void screen.model.refresh().then(() => screen.sync())
           break
-        case "p":
+        case "palette":
           key.preventDefault()
           openPalette()
           break
@@ -334,27 +400,26 @@ function CodeGraphRoute() {
     }
 
     // detail panel: [a] ask agent · [b] blast radius (TODO rules plan) · esc back
-    switch (key.name) {
-      case "a":
+    switch (actionFor(DETAIL_SCREEN_KEYMAP, key)) {
+      case "askAgent":
         key.preventDefault()
         void runAskAgent(context, screen.model.askAgent())
         break
-      case "b":
+      case "blastRadius":
         key.preventDefault()
         // TODO(Plan 4): blast-radius view over transitive callers — the nodeDetail rpc
         // payload carries direct lists only, so the traversal needs its own method first.
         console.log(`[closegraph] blast radius for ${screen.model.blastRadius()} — view lands with the rules plan (Plan 4)`)
         break
-      case "escape":
-      case "esc":
+      case "back":
         key.preventDefault()
         pop()
         break
-      case "r":
+      case "refresh":
         key.preventDefault()
-        void screen.model.refresh().then(() => syncScreen(screen))
+        void screen.model.refresh().then(() => screen.sync())
         break
-      case "p":
+      case "palette":
         key.preventDefault()
         openPalette()
         break
@@ -491,7 +556,7 @@ function CodeGraphRoute() {
         ))}
       </box>
       <text width="100%" height={1} flexShrink={0} fg="gray">
-        {"type to filter · ↑/↓ or j/k move · enter jump · esc close"}
+        {"type to filter · ↑/↓ move · enter jump · esc or ctrl-c close"}
       </text>
     </box>
   )

@@ -69,11 +69,13 @@ export function createDetailModel(deps: {
 }) {
   let banner: Banner = bannerNone();
   let lines: DetailLine[] = [{ text: ACTIONS_LINE }];
+  let title = deps.ref;
   let loadSeq = 0;
 
   function applyFailure(message: string): void {
     banner = bannerUnavailable(message);
     lines = [{ text: ACTIONS_LINE }];
+    title = deps.ref;
   }
 
   return {
@@ -88,11 +90,13 @@ export function createDetailModel(deps: {
             applyFailure(payload.message);
             return;
           }
-          banner = bannerNone();
+          // not-found still carries Provenance (Ruling 13): surface staleness here too.
+          banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
           lines = [...missLines(deps.ref, payload.suggestions), { text: ACTIONS_LINE }];
           return;
         }
         banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
+        title = deps.ref + (payload.source === "snapshot" ? " (snapshot)" : "");
         const rendered: DetailLine[] = [
           { text: `kind: ${payload.node.kind}` },
           ...(payload.signature !== undefined && payload.signature !== ""
@@ -134,7 +138,7 @@ export function createDetailModel(deps: {
     },
 
     state(): DetailState {
-      return { title: deps.ref, banner, lines };
+      return { title, banner, lines };
     },
   };
 }
