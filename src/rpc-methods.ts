@@ -50,24 +50,31 @@ function factsFor(handle: GraphHandle, node: GraphNode): RiskFacts {
     exported: node.exported,
     callers: handle.store.callers(node.id).length,
     transitiveCallers: handle.store.transitiveCallers([node.id]).size,
+    reachedFromEntries: entryReachFor(handle).get(node.id) ?? 0,
   };
 }
 
-/** File risk = the bucket of the file's aggregate facts (any exported, unique callers, union fan-in). */
+/** File risk = the bucket of the file's aggregate facts (any exported, unique callers, union
+ *  fan-in); the v1.1 entry-reach factor aggregates as max-over-symbols (the deepest single
+ *  symbol's exposure defines the file's tier — a sum would let two safe symbols outrank a hub). */
 function fileSummary(handle: GraphHandle, file: GraphNode): FileSummary {
   const symbols = handle.store.nodesOfFile(file.id);
   const callerIds = new Set<string>();
   let unresolvedCalls = 0;
+  let reachedFromEntries = 0;
+  const reach = entryReachFor(handle);
   for (const sym of symbols) {
     for (const caller of handle.store.callers(sym.id)) callerIds.add(caller.id);
     for (const edge of handle.store.edgesFrom(sym.id, "calls")) {
       if (edge.unresolved) unresolvedCalls++;
     }
+    reachedFromEntries = Math.max(reachedFromEntries, reach.get(sym.id) ?? 0);
   }
   const facts: RiskFacts = {
     exported: symbols.some((s) => s.exported),
     callers: callerIds.size,
     transitiveCallers: handle.store.transitiveCallers(symbols.map((s) => s.id)).size,
+    reachedFromEntries,
   };
   return {
     ref: file.qualifiedName,
@@ -87,7 +94,9 @@ function symbolSummary(handle: GraphHandle, node: GraphNode): SymbolSummary {
   };
 }
 
-/** Palette index per graph handle: rebuilt only when the underlying graph changes. */
+/** Palette index per graph handle. Pinned assumption: handle identity tracks graph version
+ *  (invalidate() → rebuild → new handle), so the WeakMap never serves a stale index; a future
+ *  in-place store mutation (Plan 4 watcher) must invalidate the handle or this cache lies. */
 const paletteIndexes = new WeakMap<GraphHandle, PaletteIndex>();
 
 function paletteFor(handle: GraphHandle): PaletteIndex {
@@ -97,6 +106,48 @@ function paletteFor(handle: GraphHandle): PaletteIndex {
     paletteIndexes.set(handle, index);
   }
   return index;
+}
+
+/** Entry-reach counts per graph handle — same pinned assumption as the palette cache above:
+ *  handle identity tracks graph version, so a rebuilt graph lands as a new handle. */
+const entryReachMaps = new WeakMap<GraphHandle, Map<string, number>>();
+
+/** Node id → number of DISTINCT entry points that reach it within depth 3 over forward
+ *  (callees) edges. Entry point = an exported Function/Class with zero resolved direct
+ *  callers (File nodes are never entry points). An entry point does not count as reaching
+ *  itself; other entries reaching it (directly or via a cycle) do. */
+function entryReachFor(handle: GraphHandle): Map<string, number> {
+  let reach = entryReachMaps.get(handle);
+  if (reach !== undefined) return reach;
+  reach = new Map<string, number>();
+
+  const store = handle.store;
+  const entries = store
+    .allNodes()
+    .filter((n) => (n.kind === "Function" || n.kind === "Class") && n.exported && store.callers(n.id).length === 0);
+
+  for (const entry of entries) {
+    const seen = new Set<string>([entry.id]);
+    let frontier: string[] = [entry.id];
+    for (let depth = 0; depth < 3 && frontier.length > 0; depth++) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        for (const callee of store.callees(id)) {
+          if (seen.has(callee.id)) continue;
+          seen.add(callee.id);
+          next.push(callee.id);
+        }
+      }
+      frontier = next;
+    }
+    for (const id of seen) {
+      if (id === entry.id) continue;
+      reach.set(id, (reach.get(id) ?? 0) + 1);
+    }
+  }
+
+  entryReachMaps.set(handle, reach);
+  return reach;
 }
 
 function kindOf(handle: GraphHandle, ref: string): string {

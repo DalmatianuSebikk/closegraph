@@ -36,6 +36,14 @@ export interface FileEntry {
  * ref) only extends that block downward — every existing position stays put. A block taller
  * than the viewport keeps its coordinates (it overflows its band); the view-model windows
  * over the canvas instead of re-flowing.
+ *
+ * COLLISION POLICY (binding on consumers): because bands advance by a fixed height while
+ * blocks are not height-capped, a directory with more files than the band height overflows
+ * into the next band's rows in the same column — two files can share an identical (x, y).
+ * Task 4's render model MUST render nodes in stable layout order (this Map's insertion
+ * order: directories sorted, files sorted within) and SKIP any node whose (x, y) cell is
+ * already occupied — the first stable-order node wins the cell. This keeps hit-testing and
+ * windowing deterministic without giving up append-stability.
  */
 export function fileMapLayout(
   files: FileEntry[],
