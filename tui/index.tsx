@@ -6,7 +6,7 @@ function CodeGraphRoute() {
 }
 
 export default Plugin.define({
-  id: "codegraph.tui",
+  id: "closegraph.tui",
   setup(context) {
     const unregisterRoute = context.ui.router.register({
       name: "graph",
@@ -17,11 +17,11 @@ export default Plugin.define({
       mode: "global",
       commands: [
         {
-          id: "codegraph.open",
+          id: "closegraph.open",
           title: "Open CodeGraph",
           group: "CodeGraph",
           palette: true,
-          slash: { name: "codegraph" },
+          slash: { name: "closegraph" },
           run: () => context.ui.router.navigate({ type: "plugin", name: "graph" }),
         },
       ],

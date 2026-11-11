@@ -32,7 +32,7 @@ if (positional.length === 0 || positional.length > 1) {
   process.exit(1);
 }
 if (!existsSync(repoPath)) {
-  console.error(`[codegraph] no such directory: ${repoPath}`);
+  console.error(`[closegraph] no such directory: ${repoPath}`);
   process.exit(1);
 }
 
@@ -62,23 +62,23 @@ function loadGraph(): LoadedGraph {
       const head = currentGitHead();
       if (snap.gitHead === undefined || head === undefined) {
         const why = snap.gitHead === undefined ? "snapshot has no git head" : "repo has no git head";
-        console.log(`[codegraph] cannot detect staleness (${why}) — reusing snapshot ${snapshotPath}`);
+        console.log(`[closegraph] cannot detect staleness (${why}) — reusing snapshot ${snapshotPath}`);
         return { store };
       }
       if (!isStale(snap, head)) {
-        console.log(`[codegraph] snapshot ${snapshotPath} is up to date — reusing`);
+        console.log(`[closegraph] snapshot ${snapshotPath} is up to date — reusing`);
         return { store };
       }
-      console.log(`[codegraph] snapshot ${snapshotPath} is stale — reindexing`);
+      console.log(`[closegraph] snapshot ${snapshotPath} is stale — reindexing`);
     } catch (error) {
-      console.log(`[codegraph] snapshot ${snapshotPath} unreadable (${(error as Error).message}) — reindexing`);
+      console.log(`[closegraph] snapshot ${snapshotPath} unreadable (${(error as Error).message}) — reindexing`);
     }
   }
   const result = indexRepo(repoPath);
-  console.log(`[codegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
+  console.log(`[closegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
   if (snapshotPath !== undefined) {
     writeFileSync(snapshotPath, JSON.stringify(takeSnapshot(result.store, repoPath, currentGitHead()), null, 2));
-    console.log(`[codegraph] snapshot written to ${snapshotPath}`);
+    console.log(`[closegraph] snapshot written to ${snapshotPath}`);
   }
   return result;
 }
@@ -111,7 +111,7 @@ if (metrics !== undefined) {
 if (callersName !== undefined) {
   const nodeId = callersName.includes(":") ? callersName : `Function:${callersName}`;
   if (store.getNode(nodeId) === undefined) {
-    console.error(`[codegraph] symbol not found: ${callersName} (looked for node ${nodeId})`);
+    console.error(`[closegraph] symbol not found: ${callersName} (looked for node ${nodeId})`);
     process.exit(1);
   }
   const blastRadius = store.transitiveCallers([nodeId]);

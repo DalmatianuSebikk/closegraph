@@ -1,8 +1,8 @@
 import { Plugin } from "@opencode/plugin"
 
 export default Plugin.define({
-  id: "codegraph",
+  id: "closegraph",
   setup() {
-    console.log("[codegraph] server plugin loaded")
+    console.log("[closegraph] server plugin loaded")
   },
 })
