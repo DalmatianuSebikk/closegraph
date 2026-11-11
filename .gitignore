@@ -3,3 +3,26 @@ vendor/
 dist/
 *.log
 .superpowers/
+
+# build output
+build/
+coverage/
+*.tsbuildinfo
+
+# local noise
+.DS_Store
+.idea/
+
+# secrets — never commit
+.env
+.env.*
+
+# graph artifacts (snapshot output from Task 6/13 tooling)
+*.snapshot.json
+
+# security-research artifacts (cybermes phase-2 convention)
+reports/
+
+# DEFERRED to the pre-push cleanup commit (ledger Ruling 12): docs/ research/
+# tests/ stay TRACKED mid-run so task reviews keep seeing TDD evidence. The
+# three entries are committed together with the history strip, before first push.
