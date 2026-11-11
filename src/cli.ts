@@ -27,6 +27,13 @@ const repoPath = resolve(positional[0] ?? "");
 const snapshotPath = argValue("--snapshot");
 const callersName = argValue("--callers");
 
+// --snapshot with a missing or flag-like value would silently skip writing
+// the snapshot (argValue yields undefined) — that deserves a usage error
+if (process.argv.includes("--snapshot") && snapshotPath === undefined) {
+  console.error(`[codegraph] --snapshot requires a file path value\n${USAGE}`);
+  process.exit(1);
+}
+
 if (positional.length === 0 || positional.length > 1) {
   console.error(USAGE);
   process.exit(1);
