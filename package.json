@@ -1,0 +1,27 @@
+{
+  "name": "codegraph",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "bun check"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./tui/index.tsx",
+    "./rpc": "./rpc/index.ts"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.6.6",
+    "@opentui/solid": ">=0.6.6",
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.2.7",
+    "@types/bun": "latest",
+    "@types/node": "^26.6.6"
+  },
+  "dependencies": {
+    "ts-morph": "^28.0.0"
+  }
+}
