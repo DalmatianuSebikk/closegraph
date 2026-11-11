@@ -19,7 +19,7 @@ interface ModuleSpecified {
   getModuleSpecifierSourceFile(): SourceFile | undefined;
 }
 
-function moduleSpecifierTarget(decl: ModuleSpecified): SourceFile | undefined {
+export function moduleSpecifierTarget(decl: ModuleSpecified): SourceFile | undefined {
   try {
     return decl.getModuleSpecifierSourceFile();
   } catch {

@@ -24,7 +24,7 @@ import { SyntaxKind } from "ts-morph";
 import { relative, resolve } from "node:path";
 import type { GraphEdge, GraphNode, SourceSpan } from "../graph/types.js";
 import { makeNodeId, makeQualifiedName } from "../graph/types.js";
-import { followToDeclaration } from "./resolve.js";
+import { followToDeclaration, moduleSpecifierTarget } from "./resolve.js";
 
 export interface FileExtraction {
   nodes: GraphNode[]; // 1 File node + symbol nodes
@@ -81,30 +81,33 @@ function signatureOf(fn: FunctionNode, fallbackReturn?: string): string {
   return truncate(`(${params}) => ${returnType}`);
 }
 
-/** Names of this file's symbols that other project files re-export (e.g. via a barrel). */
-function collectReExportedNames(sourceFile: SourceFile): Set<string> {
-  const names = new Set<string>();
-  for (const sf of sourceFile.getProject().getSourceFiles()) {
-    if (sf === sourceFile || sf.isFromExternalLibrary()) continue;
+/** Names of each file's symbols that other project files re-export (e.g. via a barrel). */
+export type ReExportMap = Map<SourceFile, Set<string>>;
+
+/** Precomputes the re-export map once per run; per-file scans are O(N²) at pipeline scale. */
+export function collectReExportMap(project: Project): ReExportMap {
+  const map: ReExportMap = new Map();
+  for (const sf of project.getSourceFiles()) {
+    if (sf.isFromExternalLibrary()) continue;
     for (const exportDecl of sf.getExportDeclarations()) {
-      let target: SourceFile | undefined;
-      try {
-        target = exportDecl.getModuleSpecifierSourceFile();
-      } catch {
-        target = undefined;
+      const target = moduleSpecifierTarget(exportDecl);
+      if (target === undefined) continue;
+      let names = map.get(target);
+      if (names === undefined) {
+        names = new Set();
+        map.set(target, names);
       }
-      if (target !== sourceFile) continue;
       for (const spec of exportDecl.getNamedExports()) names.add(spec.getName());
     }
   }
-  return names;
+  return map;
 }
 
 function posixBasename(path: string): string {
   return path.split("/").pop() ?? path;
 }
 
-export function extractFileSymbols(sourceFile: SourceFile, relPath: string): FileExtraction {
+export function extractFileSymbols(sourceFile: SourceFile, relPath: string, reExportedNames?: Set<string>): FileExtraction {
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
 
@@ -119,7 +122,7 @@ export function extractFileSymbols(sourceFile: SourceFile, relPath: string): Fil
     exported: true,
   });
 
-  const reExported = collectReExportedNames(sourceFile);
+  const reExported = reExportedNames ?? collectReExportMap(sourceFile.getProject()).get(sourceFile) ?? new Set<string>();
 
   const addSymbol = (node: GraphNode): void => {
     nodes.push(node);
@@ -218,8 +221,14 @@ type CalleeOutcome =
   | { kind: "unresolved"; targetName: string };
 
 /** Runs Tasks 8+9 logic plus call extraction for one file. */
-export function extractFile(project: Project, sourceFile: SourceFile, repoRoot: string, relPath: string): FullFileExtraction {
-  const base = extractFileSymbols(sourceFile, relPath);
+export function extractFile(
+  project: Project,
+  sourceFile: SourceFile,
+  repoRoot: string,
+  relPath: string,
+  reExportedNames?: Set<string>,
+): FullFileExtraction {
+  const base = extractFileSymbols(sourceFile, relPath, reExportedNames);
   const callEdges: GraphEdge[] = [];
   const seen = new Set<string>();
   const metrics: CallMetrics = { callSites: 0, resolved: 0, external: 0, unresolved: 0 };
