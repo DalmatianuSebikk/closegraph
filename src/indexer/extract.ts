@@ -1,5 +1,6 @@
 import type {
   ArrowFunction,
+  BindingElement,
   CallExpression,
   ClassDeclaration,
   ConstructorDeclaration,
@@ -8,6 +9,7 @@ import type {
   FunctionDeclaration,
   FunctionExpression,
   GetAccessorDeclaration,
+  Identifier,
   ImportDeclaration,
   ImportSpecifier,
   MethodDeclaration,
@@ -15,10 +17,12 @@ import type {
   ParameterDeclaration,
   Project,
   PropertyAccessExpression,
+  PropertyDeclaration,
   SetAccessorDeclaration,
   SourceFile,
   Symbol,
   VariableDeclaration,
+  VariableStatement,
 } from "ts-morph";
 import { SyntaxKind } from "ts-morph";
 import { relative, resolve } from "node:path";
@@ -179,6 +183,16 @@ export function extractFileSymbols(sourceFile: SourceFile, relPath: string, reEx
       if (memberName === undefined) continue;
       addFunctionSymbol(`${className}.${memberName}`, memberName, member, member, classExported);
     }
+    // function-valued class properties (arrow/function-expression initializers)
+    // are Function nodes too, e.g. `static flushSave = () => …` → `Class.flushSave`
+    for (const prop of cls.getProperties()) {
+      if (prop.getNameNode().getKind() !== SyntaxKind.Identifier) continue;
+      const init = prop.getInitializer();
+      if (init === undefined) continue;
+      if (init.getKind() !== SyntaxKind.ArrowFunction && init.getKind() !== SyntaxKind.FunctionExpression) continue;
+      const propName = prop.getName();
+      addFunctionSymbol(`${className}.${propName}`, propName, prop, init as ArrowFunction | FunctionExpression, classExported);
+    }
   }
 
   for (const fn of sourceFile.getFunctions()) {
@@ -200,6 +214,22 @@ export function extractFileSymbols(sourceFile: SourceFile, relPath: string, reEx
     }
   }
 
+  // nested function-valued locals become Function nodes under their enclosing
+  // symbol (`page.fetchData`); exported is false by construction
+  for (const decl of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    if (decl.getParent()?.getParent()?.getKind() === SyntaxKind.VariableStatement) {
+      const stmt = decl.getParent()!.getParent() as VariableStatement;
+      if (stmt.getParent()?.getKind() === SyntaxKind.SourceFile) continue; // handled above
+    }
+    if (decl.getNameNode().getKind() !== SyntaxKind.Identifier) continue;
+    const init = decl.getInitializer();
+    if (init === undefined) continue;
+    if (init.getKind() !== SyntaxKind.ArrowFunction && init.getKind() !== SyntaxKind.FunctionExpression) continue;
+    const path = symbolPathOf(decl);
+    if (path === undefined) continue;
+    addFunctionSymbol(path, decl.getName(), decl, init as ArrowFunction | FunctionExpression, false);
+  }
+
   return { nodes, edges };
 }
 
@@ -208,6 +238,12 @@ export interface CallMetrics {
   resolved: number;
   external: number;
   unresolved: number;
+}
+
+/** One classified call site; exposed for diagnostics (benchmark breakdowns). */
+export interface CallSiteInfo {
+  outcome: CalleeOutcome;
+  declKinds: string[]; // declaration kinds the callee symbol resolved to (empty = none found)
 }
 
 export interface FullFileExtraction extends FileExtraction {
@@ -220,6 +256,8 @@ type CalleeOutcome =
   | { kind: "external" }
   | { kind: "unresolved"; targetName: string };
 
+export type { CalleeOutcome };
+
 /** Runs Tasks 8+9 logic plus call extraction for one file. */
 export function extractFile(
   project: Project,
@@ -227,6 +265,7 @@ export function extractFile(
   repoRoot: string,
   relPath: string,
   reExportedNames?: Set<string>,
+  onCallSite?: (info: CallSiteInfo) => void,
 ): FullFileExtraction {
   const base = extractFileSymbols(sourceFile, relPath, reExportedNames);
   const callEdges: GraphEdge[] = [];
@@ -238,7 +277,8 @@ export function extractFile(
     if (fromId === undefined) continue; // call outside any named symbol (e.g. class property initializer)
     metrics.callSites++;
 
-    const outcome = resolveCallee(project, callExpr, repoRoot);
+    const { outcome, declKinds } = resolveCallee(project, callExpr, repoRoot);
+    onCallSite?.({ outcome, declKinds });
     if (outcome.kind === "node") {
       metrics.resolved++;
       const key = `${fromId}->${outcome.id}`;
@@ -283,47 +323,77 @@ function isTopLevel(node: Node): boolean {
   return node.getParent()?.getKind() === SyntaxKind.SourceFile;
 }
 
-/** Node id for a ts-morph node under the naming policy, or undefined when it produces no node. */
-function nodeIdFor(node: Node, relPath: string): string | undefined {
+/**
+ * Canonical symbol path for any node the naming policy extracts; undefined when
+ * the node produces no node. Single source of truth shared by extraction
+ * (extractFileSymbols) and declaration mapping (nodeIdFor).
+ */
+function symbolPathOf(node: Node): string | undefined {
   switch (node.getKind()) {
+    case SyntaxKind.ClassDeclaration: {
+      const cls = node as ClassDeclaration;
+      const name = cls.getName();
+      return name !== undefined && isTopLevel(cls) ? name : undefined;
+    }
     case SyntaxKind.MethodDeclaration:
     case SyntaxKind.GetAccessor:
     case SyntaxKind.SetAccessor: {
       const cls = parentClassNameOf(node);
       const name = (node as MethodDeclaration | GetAccessorDeclaration | SetAccessorDeclaration).getName();
-      if (cls === undefined || name === undefined) return undefined;
-      return makeNodeId("Function", makeQualifiedName(relPath, `${cls}.${name}`));
+      return cls !== undefined && name !== undefined ? `${cls}.${name}` : undefined;
     }
     case SyntaxKind.Constructor: {
       const cls = parentClassNameOf(node);
-      return cls === undefined ? undefined : makeNodeId("Function", makeQualifiedName(relPath, `${cls}.constructor`));
+      return cls !== undefined ? `${cls}.constructor` : undefined;
+    }
+    case SyntaxKind.PropertyDeclaration: {
+      const prop = node as PropertyDeclaration;
+      if (prop.getNameNode().getKind() !== SyntaxKind.Identifier) return undefined;
+      const init = prop.getInitializer();
+      if (init === undefined) return undefined;
+      if (init.getKind() !== SyntaxKind.ArrowFunction && init.getKind() !== SyntaxKind.FunctionExpression) return undefined;
+      const cls = parentClassNameOf(node);
+      return cls !== undefined ? `${cls}.${prop.getName()}` : undefined;
     }
     case SyntaxKind.FunctionDeclaration: {
       const fn = node as FunctionDeclaration;
       const name = fn.getName();
-      if (name === undefined || !isTopLevel(fn)) return undefined;
-      return makeNodeId("Function", makeQualifiedName(relPath, name));
-    }
-    case SyntaxKind.ClassDeclaration: {
-      const cls = node as ClassDeclaration;
-      const name = cls.getName();
-      if (name === undefined || !isTopLevel(cls)) return undefined;
-      return makeNodeId("Class", makeQualifiedName(relPath, name));
+      return name !== undefined && isTopLevel(fn) ? name : undefined;
     }
     case SyntaxKind.VariableDeclaration: {
+      // function-valued variables anywhere in the file: nested locals are named
+      // after their nearest enclosing extracted symbol (`page.fetchData`)
       const decl = node as VariableDeclaration;
       if (decl.getNameNode().getKind() !== SyntaxKind.Identifier) return undefined;
       const init = decl.getInitializer();
       if (init === undefined) return undefined;
       if (init.getKind() !== SyntaxKind.ArrowFunction && init.getKind() !== SyntaxKind.FunctionExpression) return undefined;
-      // mirror of extractFileSymbols: only top-level variable statements produce nodes
-      const stmt = decl.getParent()?.getParent();
-      if (stmt === undefined || stmt.getParent()?.getKind() !== SyntaxKind.SourceFile) return undefined;
-      return makeNodeId("Function", makeQualifiedName(relPath, decl.getName()));
+      const owner = enclosingSymbolPath(decl);
+      if (owner === undefined) return undefined;
+      return owner === "" ? decl.getName() : `${owner}.${decl.getName()}`;
     }
     default:
       return undefined;
   }
+}
+
+/** Symbol path of the nearest enclosing extracted symbol; "" when directly at top level. */
+function enclosingSymbolPath(node: Node): string {
+  let current: Node | undefined = node.getParent();
+  while (current !== undefined && !current.isKind(SyntaxKind.SourceFile)) {
+    const path = symbolPathOf(current);
+    if (path !== undefined) return path;
+    current = current.getParent();
+  }
+  return "";
+}
+
+/** Node id for a ts-morph node under the naming policy, or undefined when it produces no node. */
+function nodeIdFor(node: Node, relPath: string): string | undefined {
+  const path = symbolPathOf(node);
+  if (path === undefined) return undefined;
+  const qualifiedName = makeQualifiedName(relPath, path);
+  return makeNodeId(node.getKind() === SyntaxKind.ClassDeclaration ? "Class" : "Function", qualifiedName);
 }
 
 /** Enclosing named symbol for a call site; anonymous callbacks attribute to the enclosing named symbol. */
@@ -417,7 +487,117 @@ function bestEffortName(expr: Node): string {
   return expr.getText();
 }
 
-function resolveCallee(project: Project, callExpr: CallExpression, repoRoot: string): CalleeOutcome {
+/** Leftmost identifier of an expression chain, descending through property accesses and call results. */
+function leftmostIdentifier(node: Node): Identifier | undefined {
+  let current: Node = node;
+  for (let depth = 0; depth < 10 && current !== undefined; depth++) {
+    if (current.getKind() === SyntaxKind.Identifier) return current as Identifier;
+    if (current.getKind() === SyntaxKind.PropertyAccessExpression) {
+      current = (current as PropertyAccessExpression).getExpression();
+      continue;
+    }
+    if (current.getKind() === SyntaxKind.CallExpression) {
+      current = (current as CallExpression).getExpression();
+      continue;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/** True when `name` is imported through a bare specifier that fails to resolve to a project file. */
+function nameBindsToUnresolvedBareImport(sourceFile: SourceFile, name: string): boolean {
+  for (const importDecl of sourceFile.getImportDeclarations()) {
+    const specifier = importDecl.getModuleSpecifierValue();
+    if (specifier === undefined || specifier.startsWith(".") || specifier.startsWith("/")) continue;
+    let target: SourceFile | undefined;
+    try {
+      target = importDecl.getModuleSpecifierSourceFile() ?? undefined;
+    } catch {
+      target = undefined;
+    }
+    if (target !== undefined) continue; // resolves (e.g. via tsconfig paths): project-local, not external
+    const clause = importDecl.getImportClause();
+    if (clause === undefined) continue;
+    if (clause.getDefaultImport()?.getText() === name) return true;
+    if (clause.getNamespaceImport()?.getText() === name) return true;
+    for (const named of clause.getNamedImports()) {
+      if (named.getName() === name || named.getAliasNode()?.getText() === name) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the callee's value originates in an external package that is not
+ * installed: the expression's leftmost identifier binds to an unresolvable bare
+ * import, directly or through a destructured binding whose initializer is that
+ * import's call (e.g. `const [, forceRefresh] = useState(false)` → react).
+ * Failed relative imports and unknown local names stay unresolved.
+ */
+function bindsToUnresolvedBareImport(sourceFile: SourceFile, expr: Node): boolean {
+  let base = leftmostIdentifier(expr);
+  for (let hops = 0; base !== undefined && hops < 4; hops++) {
+    if (nameBindsToUnresolvedBareImport(sourceFile, base.getText())) return true;
+    // follow a destructured binding back to its initializer's origin call
+    let bindingDecl: Node | undefined;
+    try {
+      bindingDecl = base.getSymbol()?.getDeclarations().find((d) => d.getKind() === SyntaxKind.BindingElement);
+    } catch {
+      bindingDecl = undefined;
+    }
+    if (bindingDecl === undefined) return false;
+    const varDecl = bindingDecl.getParent()?.getParent();
+    if (varDecl === undefined || varDecl.getKind() !== SyntaxKind.VariableDeclaration) return false;
+    const initializer = (varDecl as VariableDeclaration).getInitializer();
+    if (initializer === undefined || initializer.getKind() !== SyntaxKind.CallExpression) return false;
+    base = leftmostIdentifier(initializer);
+  }
+  return false;
+}
+
+/**
+ * Checker-driven resolution for destructured bindings: `const { x } = origin` (or a
+ * destructured parameter) resolves through origin's type — e.g. a `typeof import(...)`
+ * module namespace yields the real exported declarations. Interfaces yield signatures,
+ * which downstream classification keeps unresolved.
+ */
+function bindingElementDeclarations(decl: Node): Node[] {
+  const binding = decl as BindingElement;
+  const propName = (binding.getPropertyNameNode() ?? binding.getNameNode()).getText();
+  const pattern = binding.getParent();
+  if (pattern === undefined) return [];
+  if (pattern.getKind() !== SyntaxKind.ObjectBindingPattern && pattern.getKind() !== SyntaxKind.ArrayBindingPattern) return [];
+  const owner = pattern.getParent();
+  if (owner === undefined) return [];
+  let originNode: Node | undefined;
+  if (owner.getKind() === SyntaxKind.VariableDeclaration) {
+    originNode = (owner as VariableDeclaration).getInitializer();
+  } else if (owner.getKind() === SyntaxKind.Parameter) {
+    originNode = owner; // the parameter's own type is the origin
+  }
+  if (originNode === undefined) return [];
+  let type;
+  try {
+    type = originNode.getType();
+  } catch {
+    return [];
+  }
+  let prop;
+  try {
+    prop = type.getProperty(propName);
+  } catch {
+    return [];
+  }
+  if (prop === undefined) return [];
+  try {
+    return prop.getDeclarations();
+  } catch {
+    return [];
+  }
+}
+
+function resolveCallee(project: Project, callExpr: CallExpression, repoRoot: string): { outcome: CalleeOutcome; declKinds: string[] } {
   const expr = callExpr.getExpression();
   const targetName = bestEffortName(expr);
 
@@ -447,14 +627,32 @@ function resolveCallee(project: Project, callExpr: CallExpression, repoRoot: str
     }
   }
 
-  decls = decls.flatMap((decl) => followSpecifiers(project, decl, 0));
-  if (decls.length === 0) return { kind: "unresolved", targetName };
+  decls = decls
+    .flatMap((decl) => followSpecifiers(project, decl, 0))
+    .flatMap((decl) => {
+      if (decl.getKind() !== SyntaxKind.BindingElement) return [decl];
+      const followed = bindingElementDeclarations(decl).flatMap((extra) => followSpecifiers(project, extra, 0));
+      return [decl, ...followed];
+    });
+  const declKinds = decls.map((decl) => decl.getKindName());
+  if (decls.length === 0) {
+    return { outcome: externalOriginOutcome(callExpr, expr, targetName), declKinds };
+  }
 
   const outcomes = decls.map((decl) => classifyDeclaration(decl, repoRoot));
   const resolved = outcomes.find((o) => o.kind === "node");
-  if (resolved !== undefined) return resolved;
-  if (outcomes.some((o) => o.kind === "external")) return { kind: "external" };
+  if (resolved !== undefined) return { outcome: resolved, declKinds };
+  if (outcomes.some((o) => o.kind === "external")) {
+    return { outcome: { kind: "external" }, declKinds };
+  }
   // declaration found but it lands in no node we extract (member of a nested class,
-  // nested function, parameter, …): unresolved edge to external:<bestEffortName>
+  // destructured hook binding, parameter, …): unresolved edge to external:<bestEffortName>
+  // unless the value originates in an unresolvable external package
+  return { outcome: externalOriginOutcome(callExpr, expr, targetName), declKinds };
+}
+
+/** Unresolved by default; external when the callee originates in an uninstalled package. */
+function externalOriginOutcome(callExpr: CallExpression, expr: Node, targetName: string): CalleeOutcome {
+  if (bindsToUnresolvedBareImport(callExpr.getSourceFile(), expr)) return { kind: "external" };
   return { kind: "unresolved", targetName };
 }

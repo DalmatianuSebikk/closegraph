@@ -5,7 +5,7 @@ import type { GraphStore } from "../graph/store.js";
 import { createMemoryStore } from "../graph/memory.js";
 import type { GraphEdge } from "../graph/types.js";
 import { makeNodeId } from "../graph/types.js";
-import type { CallMetrics } from "./extract.js";
+import type { CallMetrics, ReExportMap } from "./extract.js";
 import { collectReExportMap, extractFile } from "./extract.js";
 import { resolveImports } from "./resolve.js";
 
@@ -29,21 +29,32 @@ function globSourceFiles(repoRoot: string): string[] {
   return out.sort();
 }
 
-/** Full index of a repo. Skips node_modules/.git/dist/build/coverage. */
-export function indexRepo(repoRoot: string): IndexResult {
-  const startedAt = performance.now();
+export interface PreparedProject {
+  project: Project;
+  relPaths: string[];
+  reExported: ReExportMap;
+}
+
+/** Glob + one shared Project (repo tsconfig when present) + precomputed re-export map. */
+export function prepareProject(repoRoot: string): PreparedProject {
   const relPaths = globSourceFiles(repoRoot);
 
   const tsconfigPath = join(repoRoot, "tsconfig.json");
   const project = existsSync(tsconfigPath)
     ? new Project({ tsConfigFilePath: tsconfigPath })
-    : new Project({ skipAddingFilesFromTsConfig: false });
+    : new Project();
   // guarantee every walked file is in the project even when the tsconfig's
   // include is narrower or solution-style; already-present files are left alone
   const missing = relPaths.filter((rel) => project.getSourceFile(join(repoRoot, rel)) === undefined);
   if (missing.length > 0) project.addSourceFilesAtPaths(missing.map((rel) => join(repoRoot, rel)));
 
-  const reExported = collectReExportMap(project);
+  return { project, relPaths, reExported: collectReExportMap(project) };
+}
+
+/** Full index of a repo. Skips node_modules/.git/dist/build/coverage. */
+export function indexRepo(repoRoot: string): IndexResult {
+  const startedAt = performance.now();
+  const { project, relPaths, reExported } = prepareProject(repoRoot);
   const store = createMemoryStore();
   const metrics: IndexResult["metrics"] = {
     callSites: 0,
