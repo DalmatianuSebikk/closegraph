@@ -80,6 +80,7 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
   let title = "CodeGraph file map";
   let cursor = 0;
   let scroll = 0;
+  let loadSeq = 0;
 
   function maxRows(): number {
     return Math.max(1, dims.height - RESERVED_ROWS);
@@ -101,24 +102,39 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
     clampScroll();
   }
 
+  function applyFailure(message: string): void {
+    banner = bannerUnavailable(message);
+    lastFiles = undefined;
+    entries = [];
+    title = "CodeGraph file map";
+    cursor = 0;
+    scroll = 0;
+  }
+
   return {
+    /** Loads the file map; never rejects — every failure lands in the unavailable
+     *  banner instead of a silent blank view (R4). */
     async load(): Promise<void> {
-      const payload = await deps.files();
-      if ("error" in payload) {
-        banner = bannerUnavailable(payload.message);
-        lastFiles = undefined;
-        entries = [];
-        title = "CodeGraph file map";
-        cursor = 0;
-        scroll = 0;
-        return;
+      const seq = ++loadSeq;
+      try {
+        const payload = await deps.files();
+        if (seq !== loadSeq) return; // a newer load/refresh already won (R5)
+        if ("error" in payload) {
+          applyFailure(payload.message);
+          return;
+        }
+        banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
+        lastFiles = payload.files.map((f) => ({ ref: f.ref, riskBucket: f.riskBucket }));
+        entries = orderedEntries(lastFiles, dims);
+        title =
+          `CodeGraph file map — ${payload.files.length} files` +
+          (payload.source === "snapshot" ? " (snapshot)" : "");
+        cursor = Math.max(0, Math.min(cursor, Math.max(0, entries.length - 1)));
+        clampScroll();
+      } catch (err) {
+        if (seq !== loadSeq) return;
+        applyFailure(err instanceof Error ? err.message : String(err));
       }
-      banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
-      lastFiles = payload.files.map((f) => ({ ref: f.ref, riskBucket: f.riskBucket }));
-      entries = orderedEntries(lastFiles, dims);
-      title = `CodeGraph file map — ${payload.files.length} files`;
-      cursor = Math.max(0, Math.min(cursor, Math.max(0, entries.length - 1)));
-      clampScroll();
     },
 
     /** Dims change re-layouts without a refetch; selection survives by ref (Review Focus 2). */
