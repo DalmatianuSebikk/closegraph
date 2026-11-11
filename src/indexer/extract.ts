@@ -25,10 +25,9 @@ import type {
   VariableStatement,
 } from "ts-morph";
 import { SyntaxKind } from "ts-morph";
-import { relative, resolve } from "node:path";
 import type { GraphEdge, GraphNode, SourceSpan } from "../graph/types.js";
 import { makeNodeId, makeQualifiedName } from "../graph/types.js";
-import { followToDeclaration, moduleSpecifierTarget } from "./resolve.js";
+import { followToDeclaration, moduleSpecifierTarget, toRepoRelative } from "./resolve.js";
 
 export interface FileExtraction {
   nodes: GraphNode[]; // 1 File node + symbol nodes
@@ -274,7 +273,7 @@ export function extractFile(
 
   for (const callExpr of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const fromId = enclosingSymbolId(callExpr, relPath);
-    if (fromId === undefined) continue; // call outside any named symbol (e.g. class property initializer)
+    if (fromId === undefined) continue; // module-top-level call: no enclosing named symbol (calls in class property initializers attribute to the Class node)
     metrics.callSites++;
 
     const { outcome, declKinds } = resolveCallee(project, callExpr, repoRoot);
@@ -301,13 +300,6 @@ export function extractFile(
   }
 
   return { nodes: base.nodes, edges: base.edges, callEdges, metrics };
-}
-
-/** Repo-relative posix path of an absolute path, or undefined when it escapes the repo. */
-function repoRelativeOf(absPath: string, repoRoot: string): string | undefined {
-  const rel = relative(resolve(repoRoot), resolve(absPath));
-  if (rel === "" || rel.startsWith("..")) return undefined;
-  return rel.split(/[\\/]/).join("/");
 }
 
 function parentClassNameOf(node: Node): string | undefined {
@@ -436,7 +428,27 @@ function moduleTargetOf(decl: Node): SourceFile | undefined {
 }
 
 /** Top-level declarations of `name` in a file (mirrors the extraction walk). */
+/** Top-level declarations of `name` in a file (mirrors the extraction walk); "default" maps to the default export. */
 function declarationsOfNameIn(sf: SourceFile, name: string): Node[] {
+  if (name === "default") {
+    // narrower than resolve.ts's fileDeclares on purpose: only extractable kinds
+    try {
+      const symbol = sf.getDefaultExportSymbol();
+      if (symbol === undefined) return [];
+      try {
+        const aliased = symbol.getAliasedSymbol();
+        if (aliased !== undefined) {
+          const aliasedDecls = aliased.getDeclarations();
+          if (aliasedDecls.length > 0) return aliasedDecls;
+        }
+      } catch {
+        // not an alias — fall through to the symbol's own declarations
+      }
+      return symbol.getDeclarations();
+    } catch {
+      return [];
+    }
+  }
   const out: Node[] = [];
   const fn = sf.getFunction(name);
   if (fn !== undefined) out.push(fn);
@@ -447,16 +459,44 @@ function declarationsOfNameIn(sf: SourceFile, name: string): Node[] {
   return out;
 }
 
-/** Replaces import/export specifier declarations with the real declarations they point at. */
+/** Declarations the checker resolves an import/export binding alias to (empty when not an alias or unresolvable). */
+function aliasedDeclarationsOf(decl: Node): Node[] {
+  try {
+    const symbol = decl.getSymbol();
+    if (symbol === undefined) return [];
+    const aliased = symbol.getAliasedSymbol();
+    if (aliased === undefined) return [];
+    return aliased.getDeclarations();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Replaces import/export bindings with the real declarations they point at.
+ * Checker first: alias resolution walks whole re-export chains, including
+ * default imports (declaration is the ImportClause) and aliased re-exports
+ * (`export { named as Y }`). The manual fallback looks the ORIGINAL name up
+ * in the module target — for `export { a as B }` the target declares `a`.
+ */
 function followSpecifiers(project: Project, decl: Node, depth: number): Node[] {
   if (depth >= MAX_SPECIFIER_FOLLOW_DEPTH) return [];
-  if (decl.getKind() !== SyntaxKind.ImportSpecifier && decl.getKind() !== SyntaxKind.ExportSpecifier) {
+  const kind = decl.getKind();
+  if (kind !== SyntaxKind.ImportClause && kind !== SyntaxKind.ImportSpecifier && kind !== SyntaxKind.ExportSpecifier) {
     return [decl];
+  }
+  const aliased = aliasedDeclarationsOf(decl);
+  if (aliased.length > 0) {
+    return aliased.flatMap((d) => followSpecifiers(project, d, depth + 1));
+  }
+  const target = moduleTargetOf(decl);
+  if (target === undefined) return [];
+  if (kind === SyntaxKind.ImportClause) {
+    // `import X from "mod"`: the target's default export
+    return declarationsOfNameIn(target, "default").flatMap((d) => followSpecifiers(project, d, depth + 1));
   }
   const name = (decl as ImportSpecifier | ExportSpecifier).getName();
   if (name === undefined) return [];
-  const target = moduleTargetOf(decl);
-  if (target === undefined) return [];
   const followed = followToDeclaration(project, target, name);
   if (followed === undefined) return [];
   return declarationsOfNameIn(followed, name).flatMap((d) => followSpecifiers(project, d, depth + 1));
@@ -475,7 +515,7 @@ type DeclarationClass =
 
 function classifyDeclaration(decl: Node, repoRoot: string): DeclarationClass {
   const sf = decl.getSourceFile();
-  const rel = repoRelativeOf(sf.getFilePath(), repoRoot);
+  const rel = toRepoRelative(sf.getFilePath(), repoRoot);
   if (rel === undefined || rel.includes("/node_modules/") || isExternalFile(sf)) {
     return { kind: "external" };
   }

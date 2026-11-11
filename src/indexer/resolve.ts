@@ -1,10 +1,14 @@
 import type { Project, SourceFile } from "ts-morph";
 import { relative, resolve } from "node:path";
 
-/** Converts an absolute path to a repo-relative posix path; undefined when empty. */
-function toRepoRelative(absPath: string, repoRoot: string): string | undefined {
+/**
+ * Converts an absolute path to a repo-relative posix path; undefined when the
+ * path is the repo root itself or escapes it (".."). Shared by resolve and
+ * extract — keep semantics identical when touching this.
+ */
+export function toRepoRelative(absPath: string, repoRoot: string): string | undefined {
   const rel = relative(resolve(repoRoot), resolve(absPath));
-  if (rel === "") return undefined;
+  if (rel === "" || rel.startsWith("..")) return undefined;
   return rel.split(/[\\/]/).join("/");
 }
 
@@ -27,8 +31,20 @@ export function moduleSpecifierTarget(decl: ModuleSpecified): SourceFile | undef
   }
 }
 
-/** True when the file itself declares the symbol (not merely re-exports it). */
+/**
+ * True when the file itself declares the symbol (not merely re-exports it).
+ * Name "default" matches the file's default export. Broader than extract.ts's
+ * declarationsOfNameIn (which returns only extractable kinds) on purpose:
+ * this gates "does the walk stop here", that maps to nodes.
+ */
 function fileDeclares(sf: SourceFile, name: string): boolean {
+  if (name === "default") {
+    try {
+      return sf.getDefaultExportSymbol() !== undefined;
+    } catch {
+      return false;
+    }
+  }
   return (
     sf.getFunction(name) !== undefined ||
     sf.getClass(name) !== undefined ||
@@ -63,24 +79,35 @@ export function resolveImports(project: Project, sourceFile: SourceFile, repoRoo
  */
 export function followToDeclaration(project: Project, sourceFile: SourceFile, symbolName: string): SourceFile | undefined {
   const visited = new Set<SourceFile>();
-  const queue: SourceFile[] = [sourceFile];
+  // walk entries carry the name the symbol travels under: matching an export
+  // specifier by ALIAS continues the walk under its ORIGINAL name — for
+  // `export { named as NAMED } from "./mod"` the target declares `named`
+  const queue: Array<{ sf: SourceFile; name: string }> = [{ sf: sourceFile, name: symbolName }];
   while (queue.length > 0) {
-    const sf = queue.shift()!;
-    if (visited.has(sf)) continue;
-    visited.add(sf);
-    if (fileDeclares(sf, symbolName)) return sf;
-    for (const exportDecl of sf.getExportDeclarations()) {
+    const entry = queue.shift()!;
+    if (visited.has(entry.sf)) continue;
+    visited.add(entry.sf);
+    if (fileDeclares(entry.sf, entry.name)) return entry.sf;
+    for (const exportDecl of entry.sf.getExportDeclarations()) {
       const target = moduleSpecifierTarget(exportDecl);
       if (target === undefined || visited.has(target)) continue;
       if (exportDecl.isNamespaceExport()) {
         // `export * from "./x"`: safe to follow, fileDeclares gates the final answer
-        queue.push(target);
+        queue.push({ sf: target, name: entry.name });
         continue;
       }
-      const named = exportDecl.getNamedExports().some(
-        (spec) => spec.getName() === symbolName || spec.getAliasNode()?.getText() === symbolName,
-      );
-      if (named) queue.push(target);
+      for (const spec of exportDecl.getNamedExports()) {
+        const original = spec.getName();
+        const alias = spec.getAliasNode()?.getText();
+        if (original === entry.name) {
+          queue.push({ sf: target, name: entry.name });
+          break;
+        }
+        if (alias !== undefined && alias === entry.name) {
+          queue.push({ sf: target, name: original }); // rename hop
+          break;
+        }
+      }
     }
   }
   return undefined;
