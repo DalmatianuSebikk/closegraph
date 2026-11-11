@@ -100,6 +100,17 @@ export function collectReExportMap(project: Project): ReExportMap {
         names = new Set();
         map.set(target, names);
       }
+      // `export * from "./mod"` re-exports every non-default export of the target
+      // under its own name; `export * as ns` exports one symbol (ns) and is skipped.
+      // ts-morph's isExported() misses the declaration-site fallback for variable
+      // statements (`const helper = …; export { helper };`), so accumulate the
+      // target's export names and let the extraction sites mark them exported.
+      if (exportDecl.isNamespaceExport() && exportDecl.getNamespaceExport() === undefined) {
+        for (const symbol of target.getExportSymbols()) {
+          const name = symbol.getName();
+          if (name !== "default") names.add(name); // star re-export never carries default
+        }
+      }
       for (const spec of exportDecl.getNamedExports()) names.add(spec.getName());
     }
   }
