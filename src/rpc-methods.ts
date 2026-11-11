@@ -49,8 +49,31 @@ function factsFor(handle: GraphHandle, node: GraphNode): RiskFacts {
   return {
     exported: node.exported,
     callers: handle.store.callers(node.id).length,
-    transitiveCallers: handle.store.transitiveCallers([node.id]).size,
+    // superseded by reachedFromEntries in v1.1; recomputed if Plan 4 consumes it
+    transitiveCallers: 0,
     reachedFromEntries: entryReachFor(handle).get(node.id) ?? 0,
+  };
+}
+
+/** File risk facts = aggregation over the file's symbols (any exported, unique direct
+ *  callers, max single-symbol entry-reach — v1.1's max-over-symbols rule). Shared by
+ *  files() AND nodeDetail's File branch so the map marker and the detail panel can
+ *  never disagree for the same ref (final review I1). */
+function fileFacts(handle: GraphHandle, file: GraphNode): RiskFacts {
+  const symbols = handle.store.nodesOfFile(file.id);
+  const callerIds = new Set<string>();
+  let reachedFromEntries = 0;
+  const reach = entryReachFor(handle);
+  for (const sym of symbols) {
+    for (const caller of handle.store.callers(sym.id)) callerIds.add(caller.id);
+    reachedFromEntries = Math.max(reachedFromEntries, reach.get(sym.id) ?? 0);
+  }
+  return {
+    exported: symbols.some((s) => s.exported),
+    callers: callerIds.size,
+    // superseded by reachedFromEntries in v1.1; recomputed if Plan 4 consumes it
+    transitiveCallers: 0,
+    reachedFromEntries,
   };
 }
 
@@ -59,28 +82,17 @@ function factsFor(handle: GraphHandle, node: GraphNode): RiskFacts {
  *  symbol's exposure defines the file's tier — a sum would let two safe symbols outrank a hub). */
 function fileSummary(handle: GraphHandle, file: GraphNode): FileSummary {
   const symbols = handle.store.nodesOfFile(file.id);
-  const callerIds = new Set<string>();
   let unresolvedCalls = 0;
-  let reachedFromEntries = 0;
-  const reach = entryReachFor(handle);
   for (const sym of symbols) {
-    for (const caller of handle.store.callers(sym.id)) callerIds.add(caller.id);
     for (const edge of handle.store.edgesFrom(sym.id, "calls")) {
       if (edge.unresolved) unresolvedCalls++;
     }
-    reachedFromEntries = Math.max(reachedFromEntries, reach.get(sym.id) ?? 0);
   }
-  const facts: RiskFacts = {
-    exported: symbols.some((s) => s.exported),
-    callers: callerIds.size,
-    transitiveCallers: handle.store.transitiveCallers(symbols.map((s) => s.id)).size,
-    reachedFromEntries,
-  };
   return {
     ref: file.qualifiedName,
     symbols: symbols.length,
     unresolvedCalls,
-    riskBucket: riskBucket(facts),
+    riskBucket: riskBucket(fileFacts(handle, file)),
   };
 }
 
@@ -106,6 +118,26 @@ function paletteFor(handle: GraphHandle): PaletteIndex {
     paletteIndexes.set(handle, index);
   }
   return index;
+}
+
+/** File-summaries cache per graph handle. Same pinned assumption as the palette cache:
+ *  handle identity tracks graph version (invalidate() → rebuild → new handle), so the
+ *  WeakMap never serves stale summaries; a future in-place store mutation (Plan 4 watcher)
+ *  must invalidate the handle or these caches lie. Keeps every `r` refresh and route open
+ *  O(1) instead of re-aggregating every file (final review I2). */
+const fileSummaries = new WeakMap<GraphHandle, FileSummary[]>();
+
+function summariesFor(handle: GraphHandle): FileSummary[] {
+  let summaries = fileSummaries.get(handle);
+  if (summaries === undefined) {
+    summaries = handle.store
+      .allNodes()
+      .filter((n) => n.kind === "File")
+      .sort(byQualifiedName)
+      .map((file) => fileSummary(handle, file));
+    fileSummaries.set(handle, summaries);
+  }
+  return summaries;
 }
 
 /** Entry-reach counts per graph handle — same pinned assumption as the palette cache above:
@@ -181,11 +213,7 @@ export function createRpcHandlers(service: GraphService): {
     async files(_input, _ctx) {
       return guard((handle) => ({
         ...provenance(handle),
-        files: handle.store
-          .allNodes()
-          .filter((n) => n.kind === "File")
-          .sort(byQualifiedName)
-          .map((file) => fileSummary(handle, file)),
+        files: summariesFor(handle),
       }));
     },
 
@@ -213,7 +241,10 @@ export function createRpcHandlers(service: GraphService): {
           };
         }
         const node = resolution.node;
-        const facts = factsFor(handle, node);
+        // File nodes aggregate their symbols' facts (same source as the file map) —
+        // Ruling 5 entry points are exported Function/Class only, and every File node
+        // is exported:true, so factsFor would falsely call every file an entry point (I1).
+        const facts = node.kind === "File" ? fileFacts(handle, node) : factsFor(handle, node);
         return {
           ...provenance(handle),
           node,

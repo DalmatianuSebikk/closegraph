@@ -78,6 +78,7 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
   let entries: Entry[] = [];
   let banner: Banner = bannerNone();
   let title = "CodeGraph file map";
+  let notShown = 0; // files dropped by the Ruling-12 collision skip — disclosed, never silent (I3)
   let cursor = 0;
   let scroll = 0;
   let loadSeq = 0;
@@ -93,10 +94,16 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
     scroll = Math.max(scroll, cursor - max + 1);
   }
 
+  /** Count of payload files the current layout cannot place (collision losers). */
+  function collisionsOf(files: { ref: string }[] | undefined, laidOut: Entry[]): number {
+    return files === undefined ? 0 : files.length - laidOut.length;
+  }
+
   function reLayout(nextDims: Dims): void {
     const selectedRef = entries[cursor]?.ref;
     dims = { ...nextDims };
     entries = lastFiles === undefined ? [] : orderedEntries(lastFiles, dims);
+    notShown = collisionsOf(lastFiles, entries);
     const at = selectedRef === undefined ? -1 : entries.findIndex((e) => e.ref === selectedRef);
     cursor = at >= 0 ? at : Math.min(cursor, Math.max(0, entries.length - 1));
     clampScroll();
@@ -106,6 +113,7 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
     banner = bannerUnavailable(message);
     lastFiles = undefined;
     entries = [];
+    notShown = 0;
     title = "CodeGraph file map";
     cursor = 0;
     scroll = 0;
@@ -126,8 +134,9 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
         banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
         lastFiles = payload.files.map((f) => ({ ref: f.ref, riskBucket: f.riskBucket }));
         entries = orderedEntries(lastFiles, dims);
+        notShown = collisionsOf(lastFiles, entries);
         title =
-          `CodeGraph file map — ${payload.files.length} files` +
+          `CodeGraph file map — ${payload.files.length} ${payload.files.length === 1 ? "file" : "files"}` +
           (payload.source === "snapshot" ? " (snapshot)" : "");
         cursor = Math.max(0, Math.min(cursor, Math.max(0, entries.length - 1)));
         clampScroll();
@@ -173,7 +182,10 @@ export function createFileMapModel(deps: { files: () => Promise<FilesPayload> })
           selected: i === cursor,
         });
       }
-      return { title, banner, rows, cursor };
+      // I3: collision-skip losers are disclosed in the title, never silently dropped while
+      // the count still claims them.
+      const notShownSuffix = notShown > 0 ? ` (${notShown} not shown — narrow layout collisions)` : "";
+      return { title: title + notShownSuffix, banner, rows, cursor };
     },
   };
 }

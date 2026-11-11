@@ -21,6 +21,8 @@ export interface PaletteState {
   banner: Banner;
   rows: PaletteRow[];
   cursor: number;
+  /** Provenance of the payload behind the rows (M2: overlay title renders the snapshot suffix). */
+  source: "built" | "snapshot";
 }
 
 export const PALETTE_ACTIONS = ["up", "down", "select", "backspace", "close"] as const;
@@ -44,6 +46,7 @@ export function createPaletteModel(deps: {
   let open = false;
   let filter = "";
   let banner: Banner = bannerNone();
+  let source: "built" | "snapshot" = "built";
   let matches: { ref: string; kind: string }[] = [];
   let cursor = 0;
   let searchSeq = 0;
@@ -64,8 +67,10 @@ export function createPaletteModel(deps: {
         return;
       }
       // Ruling 13: the palette replaces the underlying view, so it must carry the
-      // staleness banner itself — never silently drop it while open.
+      // staleness banner itself — never silently drop it while open. Source rides
+      // along for the overlay's (snapshot) title suffix (M2).
       banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
+      source = payload.source;
       matches = payload.matches.map((m) => ({ ref: m.ref, kind: m.kind }));
       cursor = 0;
     } catch (err) {
@@ -120,6 +125,7 @@ export function createPaletteModel(deps: {
         open,
         filter,
         banner,
+        source,
         rows: matches.map((m, i) => ({ ...m, selected: i === cursor })),
         cursor,
       };

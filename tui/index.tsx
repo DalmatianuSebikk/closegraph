@@ -534,13 +534,16 @@ function CodeGraphRoute() {
           </text>
         ))}
       </box>
+      <text width="100%" height={1} flexShrink={0} fg="gray">
+        {"r refresh · p jump to symbol"}
+      </text>
     </box>
   )
 
   const PaletteOverlay = () => (
     <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
       <text width="100%" height={1} flexShrink={0} fg="cyan">
-        {`jump to symbol: ${paletteState().filter}`}
+        {`jump to symbol: ${paletteState().filter}${paletteState().source === "snapshot" ? " (snapshot)" : ""}`}
       </text>
       {bannerLine(paletteState().banner)}
       <box flexDirection="column" paddingTop={0} flexGrow={1}>
