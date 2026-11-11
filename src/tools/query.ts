@@ -94,6 +94,7 @@ export function createQueryTool(service: GraphService): Info {
       properties: {
         ref: {
           type: "string",
+          minLength: 1,
           description: "qualifiedName (file.ts#Symbol.path), bare symbol name, or file path",
         },
       },

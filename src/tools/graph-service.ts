@@ -92,9 +92,22 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
     const result = indexRepo(root);
     progress?.(`[closegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
     if (storage !== undefined) {
-      await storage.set(SNAPSHOT_KEY, JSON.stringify(takeSnapshot(result.store, root, await currentGitHead(root))));
+      try {
+        await storage.set(SNAPSHOT_KEY, JSON.stringify(takeSnapshot(result.store, root, await currentGitHead(root))));
+      } catch {
+        // persistence is best-effort: a failing storage must not discard a successful index
+        progress?.(`[closegraph] snapshot write failed — keeping graph in memory`);
+      }
     }
     return { store: result.store, metrics: result.metrics, source: "built", staleness: "fresh" };
+  }
+
+  async function removeSnapshotBestEffort(): Promise<void> {
+    try {
+      await storage?.remove(SNAPSHOT_KEY);
+    } catch {
+      // a storage that cannot remove must not block the rebuild either
+    }
   }
 
   async function get(progress?: (msg: string) => void): Promise<GraphHandle> {
@@ -103,32 +116,47 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
     // snapshot reuse: staleness needs a gitHead on BOTH sides — undefined on either
     // side means "cannot detect staleness", never "stale" (ledger Ruling 13)
     if (storage !== undefined) {
-      let snap: SnapshotData | undefined;
+      let raw: unknown;
       try {
-        const raw = await storage.get(SNAPSHOT_KEY);
-        if (typeof raw === "string") snap = JSON.parse(raw) as SnapshotData;
-        if (snap !== undefined) {
+        raw = await storage.get(SNAPSHOT_KEY);
+      } catch {
+        // storage outage: degrade silently to an in-memory build — no remove, no throw
+        raw = undefined;
+      }
+      if (raw !== undefined && typeof raw !== "string") {
+        // non-string at the key is corruption: drop it and rebuild
+        await removeSnapshotBestEffort();
+      }
+      if (typeof raw === "string") {
+        try {
+          const snap = JSON.parse(raw) as SnapshotData;
           const store = restoreSnapshot(snap);
           const head = await currentGitHead(root);
-          if (snap.repoRoot !== root || isStale(snap, head)) {
-            // different repo or moved HEAD: fall through to a rebuild
-          } else {
-            return {
+          if (snap.repoRoot === root && !isStale(snap, head)) {
+            const handle: GraphHandle = {
               store,
               metrics: edgeBasedMetrics(store),
               source: "snapshot",
               staleness: snap.gitHead === undefined || head === undefined ? "unknown" : "fresh",
             };
+            cached = Promise.resolve(handle);
+            return handle;
           }
+          // different repo or moved HEAD: fall through to a rebuild
+        } catch {
+          // corrupt snapshot: drop the key and rebuild
+          await removeSnapshotBestEffort();
         }
-      } catch {
-        // unreadable/corrupt snapshot: drop the key and rebuild
-        await storage.remove(SNAPSHOT_KEY);
       }
     }
 
-    cached = build(progress);
-    return cached;
+    const promise = build(progress);
+    cached = promise;
+    // a rejected build must not poison the cache: clear it so the next get() retries
+    void promise.catch(() => {
+      if (cached === promise) cached = undefined;
+    });
+    return promise;
   }
 
   return {
