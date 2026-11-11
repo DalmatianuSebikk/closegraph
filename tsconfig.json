@@ -8,5 +8,6 @@
     "jsxImportSource": "@opentui/solid",
     "skipLibCheck": true,
     "types": ["@types/bun"]
-  }
+  },
+  "exclude": ["node_modules", "tests/fixtures/mini-repo"]
 }
