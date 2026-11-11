@@ -18,8 +18,11 @@
   },
   "devDependencies": {
     "@opencode/plugin": "^2.2.7",
+    "@opentui/core": "^0.8.4",
+    "@opentui/solid": "^0.8.4",
     "@types/bun": "latest",
-    "@types/node": "^26.6.6"
+    "@types/node": "^26.6.6",
+    "solid-js": "^1.9.19"
   },
   "dependencies": {
     "ts-morph": "^28.0.0"
