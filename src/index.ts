@@ -28,6 +28,9 @@ export default Plugin.define({
     const registered = await context.tool.list();
     const names = registered.map((tool) => tool.name).filter((name) => name.startsWith("closegraph_"));
     console.log(`[closegraph] registered tools: ${names.join(", ")}`);
+    if (names.length === 0) {
+      console.error("[closegraph] no tools registered — transform did not apply?");
+    }
     return () => reg.dispose();
   },
 })
