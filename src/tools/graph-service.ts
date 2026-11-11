@@ -110,9 +110,7 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
     }
   }
 
-  async function get(progress?: (msg: string) => void): Promise<GraphHandle> {
-    if (cached !== undefined) return cached;
-
+  async function load(progress?: (msg: string) => void): Promise<GraphHandle> {
     // snapshot reuse: staleness needs a gitHead on BOTH sides — undefined on either
     // side means "cannot detect staleness", never "stale" (ledger Ruling 13)
     if (storage !== undefined) {
@@ -133,14 +131,12 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
           const store = restoreSnapshot(snap);
           const head = await currentGitHead(root);
           if (snap.repoRoot === root && !isStale(snap, head)) {
-            const handle: GraphHandle = {
+            return {
               store,
               metrics: edgeBasedMetrics(store),
               source: "snapshot",
               staleness: snap.gitHead === undefined || head === undefined ? "unknown" : "fresh",
             };
-            cached = Promise.resolve(handle);
-            return handle;
           }
           // different repo or moved HEAD: fall through to a rebuild
         } catch {
@@ -150,13 +146,21 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
       }
     }
 
-    const promise = build(progress);
-    cached = promise;
-    // a rejected build must not poison the cache: clear it so the next get() retries
-    void promise.catch(() => {
-      if (cached === promise) cached = undefined;
-    });
-    return promise;
+    return build(progress);
+  }
+
+  function get(progress?: (msg: string) => void): Promise<GraphHandle> {
+    // single-flight: assign the promise synchronously so concurrent cold callers
+    // share one load instead of each running a full indexRepo
+    if (cached === undefined) {
+      const promise = load(progress);
+      cached = promise;
+      // a rejected build must not poison the cache: clear it so the next get() retries
+      void promise.catch(() => {
+        if (cached === promise) cached = undefined;
+      });
+    }
+    return cached;
   }
 
   return {

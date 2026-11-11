@@ -1,6 +1,7 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { resolveRef, type Resolution } from "./resolve-ref.js";
+import { capLines, clampDepth, graphMeta, stalenessNoteLines } from "./render-utils.js";
 
 const DEFAULT_DEPTH = 1;
 const MAX_DEPTH = 3;
@@ -14,21 +15,13 @@ export interface SubgraphInput {
   direction?: "out" | "in" | "any";
 }
 
-function clampDepth(depth: number | undefined): number {
-  return Math.min(MAX_DEPTH, Math.max(1, depth ?? DEFAULT_DEPTH));
-}
-
-/** Content stays ≤ MAX_LINES including the section headers and the truncation notice itself. */
-function capLines(lines: string[], notice: (omitted: number) => string): { lines: string[]; truncated: boolean } {
-  if (lines.length <= MAX_LINES) return { lines, truncated: false };
-  const kept = lines.slice(0, MAX_LINES - 1);
-  return { lines: [...kept, notice(lines.length - kept.length)], truncated: true };
-}
-
 /** One line per ref that failed to resolve, so the caller can fix every seed in one round trip. */
 function renderRefMiss(ref: string, res: Resolution): string {
-  if (res.candidates.length > 1 || (res.ambiguous && res.candidates.length > 0)) {
+  if (res.ambiguous) {
     return `ambiguous ref ${ref} — matches: ${res.candidates.map((n) => n.qualifiedName).join(", ")}`;
+  }
+  if (res.candidates.length > 1) {
+    return `not found: ${ref} (did you mean one of: ${res.candidates.map((n) => n.qualifiedName).join(", ")}?)`;
   }
   if (res.suggestion !== undefined) return `not found: ${ref} (did you mean ${res.suggestion}?)`;
   return `not found: ${ref} (no similar symbols in the graph)`;
@@ -61,6 +54,7 @@ export function createSubgraphTool(service: GraphService): Info {
           default: DEFAULT_DEPTH,
           minimum: 1,
           maximum: MAX_DEPTH,
+          multipleOf: 1,
           description: `BFS hops from the seeds (default ${DEFAULT_DEPTH}, max ${MAX_DEPTH})`,
         },
         direction: {
@@ -91,6 +85,8 @@ export function createSubgraphTool(service: GraphService): Info {
       }
 
       // resolve every seed up front and fail fast, naming each ref that missed
+      const graph = graphMeta(handle);
+      const note = stalenessNoteLines(handle);
       const misses: string[] = [];
       const seedIds: string[] = [];
       for (const ref of refs) {
@@ -103,11 +99,13 @@ export function createSubgraphTool(service: GraphService): Info {
           content: [
             `could not resolve ${misses.length} of ${refs.length} refs:`,
             ...misses.map((line) => `  ${line}`),
+            ...note,
           ].join("\n"),
+          metadata: { graph },
         };
       }
 
-      const depth = clampDepth(input.depth);
+      const depth = clampDepth(input.depth, DEFAULT_DEPTH, MAX_DEPTH);
       const direction = input.direction ?? "any";
       const view = handle.store.subgraph(seedIds, { depth, direction: STORE_DIRECTION[direction] });
 
@@ -120,16 +118,17 @@ export function createSubgraphTool(service: GraphService): Info {
 
       const allLines = [
         `subgraph (direction ${direction}, depth ${depth}): ${nodes.length} nodes, ${edges.length} edges`,
+        ...note,
         `nodes (${nodes.length}):`,
         ...nodes,
         `edges (${edges.length}):`,
         ...edges.map(([from, to]) => `${from} -> ${to}`),
       ];
-      const { lines, truncated } = capLines(allLines, (omitted) => `(truncated, ${omitted} more — narrow depth or use fewer refs)`);
+      const { lines, truncated } = capLines(allLines, MAX_LINES, (omitted) => `(truncated, ${omitted} more — narrow depth or use fewer refs)`);
 
       return {
         content: lines.join("\n"),
-        metadata: { nodes, edges, truncated },
+        metadata: { nodes, edges, truncated, graph },
       };
     },
   };

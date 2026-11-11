@@ -2,6 +2,7 @@ import type { Info } from "@opencode/plugin/promise/tool";
 import type { GraphNode } from "../graph/types.js";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { renderMatches, resolveRef } from "./resolve-ref.js";
+import { graphMeta, stalenessNoteLines } from "./render-utils.js";
 
 /** ts-morph stores signatures arrow-style; render them in the friendlier method form. */
 function renderSignature(node: GraphNode): string {
@@ -59,22 +60,27 @@ export function createQueryTool(service: GraphService): Info {
       }
 
       const { node, candidates, suggestion, ambiguous } = resolveRef(handle, input.ref);
+      const graph = graphMeta(handle);
+      const note = stalenessNoteLines(handle);
       if (node !== undefined) {
         const callers = handle.store.callers(node.id);
         const callees = handle.store.callees(node.id);
         return {
-          content: renderNode(handle, node),
-          metadata: { node, callers, callees },
+          content: [renderNode(handle, node), ...note].join("\n"),
+          metadata: { node, callers, callees, graph },
         };
       }
       if (candidates.length > 0) {
         const heading = ambiguous ? "multiple matches" : "not found — did you mean";
         return {
-          content: renderMatches(input.ref, candidates, heading),
-          metadata: { suggestion },
+          content: [renderMatches(input.ref, candidates, heading), ...note].join("\n"),
+          metadata: { suggestion, graph },
         };
       }
-      return { content: `not found: ${input.ref} (no similar symbols in the graph)` };
+      return {
+        content: [`not found: ${input.ref} (no similar symbols in the graph)`, ...note].join("\n"),
+        metadata: { graph },
+      };
     },
   };
 }

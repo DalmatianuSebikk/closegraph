@@ -1,6 +1,7 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { renderMatches, resolveRef } from "./resolve-ref.js";
+import { capLines, clampDepth, graphMeta, stalenessNoteLines } from "./render-utils.js";
 
 const DEFAULT_DEPTH = 3;
 const MAX_DEPTH = 5;
@@ -12,31 +13,23 @@ export interface BlastRadiusInput {
   depth?: number;
 }
 
-function clampDepth(depth: number | undefined): number {
-  return Math.min(MAX_DEPTH, Math.max(1, depth ?? DEFAULT_DEPTH));
-}
-
-/** Content stays ≤ MAX_LINES including the header and the truncation notice itself. */
-function capLines(lines: string[], notice: (omitted: number) => string): { lines: string[]; truncated: boolean } {
-  if (lines.length <= MAX_LINES) return { lines, truncated: false };
-  const kept = lines.slice(0, MAX_LINES - 1);
-  return { lines: [...kept, notice(lines.length - kept.length)], truncated: true };
-}
-
 /**
  * Affected node ids by direction.
  * - callers: full transitive closure via store.transitiveCallers (already excludes the seed);
- *   depth does not bound this side — a caller at any distance breaks when the symbol changes.
+ *   depth never bounds this side — a caller at any distance breaks when the symbol changes.
  * - callees: subgraph BFS following call edges out, bounded by depth, seed excluded.
- * - both: subgraph BFS in both directions bounded by depth (the union of the two sides at
- *   ≤ depth), seed excluded.
+ * - both: the plan's union — transitive callers ∪ depth-bounded callees, seed excluded.
  */
 function affectedIds(handle: GraphHandle, seedId: string, direction: "callers" | "callees" | "both", depth: number): string[] {
-  if (direction === "callers") return [...handle.store.transitiveCallers([seedId])];
-
-  const storeDirection = direction; // store vocabulary: "callees" | "both"
-  const view = handle.store.subgraph([seedId], { depth, direction: storeDirection });
-  return view.nodes.filter((n) => n.id !== seedId).map((n) => n.id);
+  const callers = () => [...handle.store.transitiveCallers([seedId])];
+  const callees = () =>
+    handle.store
+      .subgraph([seedId], { depth, direction: "callees" })
+      .nodes.filter((n) => n.id !== seedId)
+      .map((n) => n.id);
+  if (direction === "callers") return callers();
+  if (direction === "callees") return callees();
+  return [...new Set([...callers(), ...callees()])];
 }
 
 /** closegraph_blast_radius: transitive impact of one symbol — everything that can break when it changes. */
@@ -45,8 +38,8 @@ export function createBlastRadiusTool(service: GraphService): Info {
     name: "closegraph_blast_radius",
     description:
       "Compute the blast radius of one symbol: every caller transitively affected by a change (direction callers, " +
-      "the default), everything it calls within a depth budget (callees), or both. " +
-      "Use it before editing to gauge impact size; pair with closegraph_subgraph to see the surrounding graph. " +
+      "the default), everything it calls within a depth budget (callees), or both (transitive callers plus " +
+      "depth-bounded callees). Use it before editing to gauge impact size; pair with closegraph_subgraph to see the surrounding graph. " +
       "ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name, or a file path.",
     input: {
       type: "object",
@@ -60,14 +53,17 @@ export function createBlastRadiusTool(service: GraphService): Info {
           type: "string",
           enum: ["callers", "callees", "both"],
           default: "callers",
-          description: "callers = who breaks when the symbol changes (transitive); callees = what it calls, depth-bounded; both = union, depth-bounded",
+          description:
+            "callers = who breaks when the symbol changes (fully transitive); callees = what it calls, depth-bounded; " +
+            "both = transitive callers plus depth-bounded callees",
         },
         depth: {
           type: "number",
           default: DEFAULT_DEPTH,
           minimum: 1,
           maximum: MAX_DEPTH,
-          description: `BFS depth for the callees/both sides (default ${DEFAULT_DEPTH}, max ${MAX_DEPTH}); callers are always fully transitive`,
+          multipleOf: 1,
+          description: `BFS depth for the callees side (default ${DEFAULT_DEPTH}, max ${MAX_DEPTH}); callers are always fully transitive`,
         },
       },
       required: ["ref"],
@@ -84,30 +80,42 @@ export function createBlastRadiusTool(service: GraphService): Info {
       }
 
       const { node, candidates, suggestion, ambiguous } = resolveRef(handle, input.ref);
+      const graph = graphMeta(handle);
+      const note = stalenessNoteLines(handle);
       if (node === undefined) {
         if (candidates.length > 0) {
           const heading = ambiguous ? "multiple matches" : "not found — did you mean";
           return {
-            content: renderMatches(input.ref, candidates, heading),
-            metadata: { suggestion },
+            content: [renderMatches(input.ref, candidates, heading), ...note].join("\n"),
+            metadata: { suggestion, graph },
           };
         }
-        return { content: `not found: ${input.ref} (no similar symbols in the graph)` };
+        return {
+          content: [`not found: ${input.ref} (no similar symbols in the graph)`, ...note].join("\n"),
+          metadata: { graph },
+        };
       }
 
       const direction = input.direction ?? "callers";
-      const depth = clampDepth(input.depth);
+      const depth = clampDepth(input.depth, DEFAULT_DEPTH, MAX_DEPTH);
       const seedId = node.id;
       const affected = affectedIds(handle, seedId, direction, depth)
         .map((id) => handle.store.getNode(id)?.qualifiedName ?? id)
         .sort((a, b) => a.localeCompare(b));
 
-      const header = `blast radius: ${node.qualifiedName} (direction ${direction}, depth ${depth}) — ${affected.length} affected`;
-      const { lines } = capLines([header, ...affected], (omitted) => `(truncated, ${omitted} more — narrow depth or use closegraph_subgraph)`);
+      // depth cannot shrink the transitive-caller side, so the callers-mode header omits it
+      const scope = direction === "callers" ? "direction callers" : `direction ${direction}, depth ${depth}`;
+      const header = `blast radius: ${node.qualifiedName} (${scope}) — ${affected.length} affected`;
+      // ...and its truncation notice offers the bounded-view tool instead of a no-op depth narrowing
+      const notice =
+        direction === "callers"
+          ? (omitted: number) => `(truncated, ${omitted} more — use closegraph_subgraph for a bounded view)`
+          : (omitted: number) => `(truncated, ${omitted} more — narrow depth or use closegraph_subgraph)`;
+      const { lines } = capLines([header, ...note, ...affected], MAX_LINES, notice);
 
       return {
         content: lines.join("\n"),
-        metadata: { direction, depth, seeds: [node.qualifiedName], affected },
+        metadata: { direction, depth, seeds: [node.qualifiedName], affected, graph },
       };
     },
   };
