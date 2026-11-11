@@ -1,0 +1,74 @@
+# closegraph
+
+**Your codebase as a graph — inside OpenCode. Both for you *and* your AI.**
+
+An [OpenCode](https://opencode.ai) plugin that indexes a TypeScript repo into a
+property graph: files, functions, classes, who calls who. Then it gives you a
+**TUI map** to explore it and your **agent three tools** to query it.
+
+Built for security review: find what a function touches, what breaks if you
+change it, and where the risky spots are — without hallucinated answers.
+
+---
+
+## What you get
+
+| Surface | What it does |
+|---|---|
+| `/closegraph` route (TUI) | Full-screen **file map** with risk shading → click/`Enter` drills into symbols → **detail panel** (callers, callees, signature, risk) |
+| `p` in the TUI | **Jump palette** — fuzzy-ish prefix search, arrows to move, type to filter |
+| Ask-agent | One keypress **injects a prompt about the node** into your session and jumps to chat |
+| `closegraph_query` (tool) | Node facts + direct callers/callees for any symbol |
+| `closegraph_blast_radius` (tool) | *What breaks if I change this?* — transitive callers, bounded output |
+| `closegraph_subgraph` (tool) | Ego graph around 1–5 seeds, hard line cap so hubs can't flood context |
+
+Everything the graph says is **deterministic** — parsed with ts-morph's type
+checker, not guessed by a model. Stale graph? It tells you.
+
+## Install (local plugin)
+
+```jsonc
+// ~/.config/opencode/opencode.jsonc
+{ "plugins": ["/absolute/path/to/closegraph"] }
+```
+
+Absolute path required. Then open any TS repo → `/closegraph`.
+
+## Try it from chat
+
+```
+> what breaks if I change formatName?
+(model calls closegraph_blast_radius → real callers, zero guessing)
+
+> show me the subgraph around UserService
+```
+
+## CLI (no OpenCode needed)
+
+```sh
+bun run src/cli.ts <repo>                     # index + stats
+bun run src/cli.ts <repo> --callers src/a.ts#fn
+bun run src/cli.ts <repo> --snapshot out.json
+```
+
+## Numbers
+
+- **81.2%** of intra-project call sites resolved on a real repo (excalidraw) — measured, not vibes
+- **234/234** tests green · snapshot reuse + staleness detection · single-flight indexing
+
+## Risk colors (v1 — structural, honest)
+
+`!!!` high · `!` medium · unmarked low. Based on **entry-point reach** and
+fan-in — explainable in one line, no ML. Real vulnerability *rules* (dangerous
+sinks, `eval`, SQL concat, missing await…) are **Plan 4** — the schema already
+has Finding nodes waiting.
+
+## Status
+
+- ✅ Plan 1 — graph engine + snapshot + CLI
+- ✅ Plan 2 — agent tools
+- ✅ Plan 3 — TUI graph view
+- 🔜 Plan 4 — deterministic rules layer (Finding nodes + reachability)
+- 🔮 Later — black-box attack-surface mode (endpoints/params as graph nodes)
+
+MIT. Bun + pure-JS deps only (ts-morph, OpenTUI, solid-js).
