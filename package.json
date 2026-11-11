@@ -12,6 +12,7 @@
     "./rpc": "./rpc/index.ts"
   },
   "peerDependencies": {
+    "@opencode/plugin": "^2.2.7",
     "@opentui/core": ">=0.6.6",
     "@opentui/solid": ">=0.6.6",
     "solid-js": ">=1.9.0"
@@ -20,7 +21,7 @@
     "@opencode/plugin": "^2.2.7",
     "@opentui/core": "^0.8.4",
     "@opentui/solid": "^0.8.4",
-    "@types/bun": "latest",
+    "@types/bun": "^1.4.4",
     "@types/node": "^26.6.6",
     "solid-js": "^1.9.19"
   },
