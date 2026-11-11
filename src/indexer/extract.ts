@@ -264,6 +264,9 @@ function repoRelativeOf(absPath: string, repoRoot: string): string | undefined {
 function parentClassNameOf(node: Node): string | undefined {
   const parent = node.getParent();
   if (parent === undefined || parent.getKind() !== SyntaxKind.ClassDeclaration) return undefined;
+  // mirror of extractFileSymbols (sourceFile.getClasses()): only top-level classes
+  // and their members become nodes — members of nested classes produce none
+  if (!isTopLevel(parent)) return undefined;
   return (parent as ClassDeclaration).getName() ?? undefined;
 }
 
@@ -386,15 +389,19 @@ function isExternalFile(sf: SourceFile): boolean {
   return path.includes("/node_modules/") || /^lib\..*\.d\.ts$/.test(posixBasename(path));
 }
 
-function classifyDeclaration(decl: Node, repoRoot: string): CalleeOutcome {
+type DeclarationClass =
+  | { kind: "node"; id: string }
+  | { kind: "external" }       // node_modules, lib.*.d.ts, builtins, outside the repo
+  | { kind: "unextractable" }; // project-local declaration that lands in no node we extract
+
+function classifyDeclaration(decl: Node, repoRoot: string): DeclarationClass {
   const sf = decl.getSourceFile();
   const rel = repoRelativeOf(sf.getFilePath(), repoRoot);
   if (rel === undefined || rel.includes("/node_modules/") || isExternalFile(sf)) {
-    return { kind: "external" }; // node_modules, lib.*.d.ts, builtins, outside the repo
+    return { kind: "external" };
   }
   const id = nodeIdFor(decl, rel);
-  // project-local but not a node kind we extract (nested function, property, …): known target, outside the node set
-  return id === undefined ? { kind: "external" } : { kind: "node", id };
+  return id === undefined ? { kind: "unextractable" } : { kind: "node", id };
 }
 
 function bestEffortName(expr: Node): string {
@@ -438,5 +445,7 @@ function resolveCallee(project: Project, callExpr: CallExpression, repoRoot: str
   const resolved = outcomes.find((o) => o.kind === "node");
   if (resolved !== undefined) return resolved;
   if (outcomes.some((o) => o.kind === "external")) return { kind: "external" };
+  // declaration found but it lands in no node we extract (member of a nested class,
+  // nested function, parameter, …): unresolved edge to external:<bestEffortName>
   return { kind: "unresolved", targetName };
 }
