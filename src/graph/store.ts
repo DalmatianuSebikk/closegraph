@@ -20,4 +20,13 @@ export interface GraphStore {
   callees(id: string): GraphNode[];            // resolved calls only
   allNodes(): GraphNode[];
   stats(): GraphStats;
+  transitiveCallers(ids: string[]): Set<string>;          // blast radius, excludes seeds
+  subgraph(seeds: string[], opts: { depth: number; direction: Direction }): SubgraphView;
+}
+
+export type Direction = "callers" | "callees" | "both";
+
+export interface SubgraphView {
+  nodes: GraphNode[];
+  edges: GraphEdge[];   // only edges with both endpoints in nodes
 }

@@ -1,5 +1,5 @@
 import type { GraphNode, GraphEdge, EdgeKind } from "./types.js";
-import type { GraphStore, GraphStats } from "./store.js";
+import type { Direction, GraphStore, GraphStats, SubgraphView } from "./store.js";
 
 function sameEdge(a: GraphEdge, b: GraphEdge): boolean {
   return a.kind === b.kind && a.from === b.from && a.to === b.to;
@@ -81,6 +81,51 @@ class MemoryStore implements GraphStore {
 
   allNodes(): GraphNode[] {
     return [...this.nodes.values()];
+  }
+
+  transitiveCallers(ids: string[]): Set<string> {
+    const seeds = new Set(ids);
+    const visited = new Set(ids);
+    const result = new Set<string>();
+    const queue = [...ids];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const e of this.edgesTo(current, "calls")) {
+        if (!isResolvedCall(e) || visited.has(e.from)) continue;
+        visited.add(e.from);
+        if (!seeds.has(e.from)) result.add(e.from);
+        queue.push(e.from);
+      }
+    }
+    return result;
+  }
+
+  subgraph(seeds: string[], opts: { depth: number; direction: Direction }): SubgraphView {
+    const included = new Set(seeds.filter((id) => this.nodes.has(id)));
+    if (opts.depth > 0) {
+      let frontier = [...included];
+      for (let level = 0; level < opts.depth && frontier.length > 0; level++) {
+        const next: string[] = [];
+        for (const id of frontier) {
+          const outCalls = opts.direction !== "callers" ? this.edgesFrom(id, "calls").filter(isResolvedCall).map((e) => e.to) : [];
+          const inCalls = opts.direction !== "callees" ? this.edgesTo(id, "calls").filter(isResolvedCall).map((e) => e.from) : [];
+          for (const other of [...outCalls, ...inCalls]) {
+            if (!this.nodes.has(other) || included.has(other)) continue;
+            included.add(other);
+            next.push(other);
+          }
+        }
+        frontier = next;
+      }
+    }
+    const nodes = [...included].map((id) => this.nodes.get(id)!);
+    const edges: GraphEdge[] = [];
+    for (const id of included) {
+      for (const e of this.edgesFrom(id)) {
+        if (included.has(e.to)) edges.push(e);
+      }
+    }
+    return { nodes, edges };
   }
 
   stats(): GraphStats {
