@@ -134,5 +134,9 @@ export function createSubgraphTool(service: GraphService): Info {
   };
 }
 
-/** Ready-made instance over the process working directory; plugin setup rebuilds it with ctx.storage. */
+/**
+ * Ready-made instance over the process working directory; plugin setup rebuilds it with ctx.storage.
+ * @internal test convenience only — the rpc handlers and TUI must build their own service
+ * bound to the plugin context root (Ruling 6).
+ */
 export const subgraphTool: Info = createSubgraphTool(createGraphService(process.cwd()));

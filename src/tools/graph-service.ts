@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { indexRepo } from "../indexer/pipeline.js";
 import { isStale, restoreSnapshot, takeSnapshot } from "../graph/snapshot.js";
 import type { SnapshotData } from "../graph/snapshot.js";
@@ -39,7 +39,26 @@ export interface GraphService {
   invalidate(): void;
 }
 
-const SNAPSHOT_KEY = "closegraph/snapshot.json";
+/** 8-hex-char digest of a string (FNV-1a 32-bit) — the same slice-width approach as the
+ *  graph's disambiguateId (src/graph/types.ts); disambiguateId slices an existing content
+ *  hash, so the digest itself lives here. */
+function hash8(value: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
+/** Ruling 7: snapshot storage key namespaced per root — closegraph/<basename>-<hash8(abs
+ *  root)>/snapshot.json — so multiple roots never collide on one key. The pre-namespace
+ *  single key simply becomes stale garbage (accepted migration: no removal of the old key). */
+export function snapshotStorageKey(root: string): string {
+  const absRoot = resolve(root);
+  const basename = absRoot.split("/").filter(Boolean).at(-1) ?? "root";
+  return `closegraph/${basename}-${hash8(absRoot)}/snapshot.json`;
+}
 
 /** git rev-parse HEAD; undefined when not a git repo or git fails (mirrors cli.ts's helper). */
 async function currentGitHead(root: string): Promise<string | undefined> {
@@ -83,6 +102,7 @@ function edgeBasedMetrics(store: GraphStore): IndexMetrics {
 /** Lazy graph lifecycle: build once, reuse in-memory, reuse across services via the persisted snapshot. */
 export function createGraphService(root: string, storage?: PluginStorage): GraphService {
   let cached: Promise<GraphHandle> | undefined;
+  const SNAPSHOT_KEY = snapshotStorageKey(root);
 
   async function build(progress?: (msg: string) => void): Promise<GraphHandle> {
     if (!existsSync(join(root, "tsconfig.json"))) {
