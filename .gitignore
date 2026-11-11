@@ -26,3 +26,4 @@ reports/
 # DEFERRED to the pre-push cleanup commit (ledger Ruling 12): docs/ research/
 # tests/ stay TRACKED mid-run so task reviews keep seeing TDD evidence. The
 # three entries are committed together with the history strip, before first push.
+task-*-report.md
