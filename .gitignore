@@ -1,5 +1,12 @@
 node_modules/
-vendor/
+# vendor/ stays ignored EXCEPT the grammar wasms the pack runtime loads —
+# they are committed binaries (see vendor/grammars/PROVENANCE.md); a parent
+# dir exclusion cannot be re-included, so vendor/ is ignored per-entry here
+vendor/*
+!vendor/grammars/
+vendor/grammars/*
+!vendor/grammars/*.wasm
+!vendor/grammars/PROVENANCE.md
 dist/
 *.log
 .superpowers/
