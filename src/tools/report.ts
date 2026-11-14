@@ -2,13 +2,12 @@ import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { capList, graphMeta, stalenessNoteLines } from "./render-utils.js";
 import { riskBucket } from "../view/risk.js";
-import type { GraphNode } from "../graph/types.js";
+// shared entry-reach (Batch B review R-A): one implementation, exported by the rpc side
+import { entryReachFor } from "../rpc-methods.js";
 
 /** Hub list and entry-sample caps: the report is an overview, not an index dump. */
 const TOP_HUBS = 10;
 const TOP_ENTRIES = 10;
-/** Entry-reach depth — same bound as the rpc side's entryReachFor (v1.1 risk factor). */
-const ENTRY_REACH_DEPTH = 3;
 
 /** Code-unit ordering (no localeCompare) — same-graph ⇒ same output on every machine, matching the view modules. */
 function byQualifiedName(a: { qualifiedName: string }, b: { qualifiedName: string }): number {
@@ -37,34 +36,6 @@ interface ReportData {
  * this cache lies.
  */
 const reportCache = new WeakMap<GraphHandle, ReportData>();
-
-/** Node id → number of DISTINCT entry points reaching it within ENTRY_REACH_DEPTH over callees
- *  edges — the v1.1 risk factor; same rule as the rpc side's entryReachFor. */
-function entryReachFor(handle: GraphHandle): Map<string, number> {
-  const store = handle.store;
-  const symbols = store.allNodes().filter((n): n is GraphNode => n.kind === "Function" || n.kind === "Class");
-  const reach = new Map<string, number>();
-  for (const entry of symbols.filter((n) => n.exported && store.callers(n.id).length === 0)) {
-    const seen = new Set<string>([entry.id]);
-    let frontier: string[] = [entry.id];
-    for (let depth = 0; depth < ENTRY_REACH_DEPTH && frontier.length > 0; depth++) {
-      const next: string[] = [];
-      for (const id of frontier) {
-        for (const callee of store.callees(id)) {
-          if (seen.has(callee.id)) continue;
-          seen.add(callee.id);
-          next.push(callee.id);
-        }
-      }
-      frontier = next;
-    }
-    for (const id of seen) {
-      if (id === entry.id) continue;
-      reach.set(id, (reach.get(id) ?? 0) + 1);
-    }
-  }
-  return reach;
-}
 
 function computeReport(handle: GraphHandle): ReportData {
   const store = handle.store;
@@ -183,6 +154,7 @@ export function createReportTool(service: GraphService): Info {
           counts: data.counts,
           resolution: data.resolution,
           hubs: data.hubs,
+          hiddenHubs: data.hiddenHubs,
           entryPoints: data.entryPoints,
           graph: graphMeta(handle),
         },

@@ -22,7 +22,8 @@ whole files to understand structure or impact.
 
 **Ref format:** `src/lib/util.ts#formatName` (qualifiedName). Bare symbol names
 (`formatName`, `Calculator.add`) and file paths (`src/lib/util.ts`) also resolve —
-in that order. All tools accept any of the three.
+in that order. Any ref-taking tool accepts any of the three; `closegraph_report`
+takes no input at all.
 
 **Query before grep:** before grepping, tracing call sites, or opening a file to
 understand who calls what, call the matching `closegraph_*` tool. Fall back to

@@ -49,15 +49,16 @@ function listLines(label: string, refs: string[]): DetailLine[] {
   return lines;
 }
 
-/** The not-found branch renders the tools' candidate wording — imported, not mirrored. */
-function missLines(ref: string, suggestions: string[]): DetailLine[] {
+/** detail not-found heading branches on `ambiguous` (M3): several real matches read as
+ *  "multiple matches", a single/zero look-alike keeps the tools' "did you mean" voice. */
+function missLines(ref: string, suggestions: string[], ambiguous: boolean): DetailLine[] {
   if (suggestions.length === 0) {
     return [{ text: `not found: ${ref} (no similar symbols in the graph)` }];
   }
   return renderMatches(
     ref,
     suggestions.map((qualifiedName) => ({ qualifiedName }) as GraphNode),
-    "not found — did you mean",
+    ambiguous ? "multiple matches — did you mean" : "not found — did you mean",
   )
     .split("\n")
     .map((text) => ({ text }));
@@ -92,7 +93,7 @@ export function createDetailModel(deps: {
           }
           // not-found still carries Provenance (Ruling 13): surface staleness here too.
           banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
-          lines = [...missLines(deps.ref, payload.suggestions), { text: ACTIONS_LINE }];
+          lines = [...missLines(deps.ref, payload.suggestions, payload.ambiguous), { text: ACTIONS_LINE }];
           return;
         }
         banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();

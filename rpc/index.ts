@@ -42,6 +42,8 @@ export interface NodeDetail {
 
 export interface NotFoundPayload extends Provenance {
   error: "not-found";
+  /** true = the ref matched several nodes (suffix/file ambiguity); false = zero or one look-alike. */
+  ambiguous: boolean;
   suggestions: string[];     // qualifiedNames worth retrying
 }
 

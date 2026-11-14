@@ -141,14 +141,16 @@ function summariesFor(handle: GraphHandle): FileSummary[] {
 }
 
 /** Entry-reach counts per graph handle — same pinned assumption as the palette cache above:
- *  handle identity tracks graph version, so a rebuilt graph lands as a new handle. */
+ *  handle identity tracks graph version, so a rebuilt graph lands as a new handle.
+ *  SHARED (Batch B review R-A): the closegraph_report tool consumes this same function —
+ *  there is exactly one entry-reach implementation, never a fork. */
 const entryReachMaps = new WeakMap<GraphHandle, Map<string, number>>();
 
 /** Node id → number of DISTINCT entry points that reach it within depth 3 over forward
  *  (callees) edges. Entry point = an exported Function/Class with zero resolved direct
  *  callers (File nodes are never entry points). An entry point does not count as reaching
  *  itself; other entries reaching it (directly or via a cycle) do. */
-function entryReachFor(handle: GraphHandle): Map<string, number> {
+export function entryReachFor(handle: GraphHandle): Map<string, number> {
   let reach = entryReachMaps.get(handle);
   if (reach !== undefined) return reach;
   reach = new Map<string, number>();
@@ -237,6 +239,7 @@ export function createRpcHandlers(service: GraphService): {
           return {
             ...provenance(handle),
             error: "not-found",
+            ambiguous: resolution.ambiguous,
             suggestions: resolution.candidates.map((n) => n.qualifiedName),
           };
         }
