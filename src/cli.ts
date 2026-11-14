@@ -113,19 +113,24 @@ if (hookMode) {
       // never touches .git/info/exclude) — skip the append when the exact block +
       // basename is already present instead of appending a duplicate
       const block = `# closegraph post-commit hook artifact\n${basename(snapshotOut)}`;
-      const alreadyExcluded = existsSync(exclude) && readFileSync(exclude, "utf8").includes(block);
-      if (!alreadyExcluded) {
-        try {
-          mkdirSync(dirname(exclude), { recursive: true });
+      try {
+        mkdirSync(dirname(exclude), { recursive: true });
+        // an existing-but-unreadable exclude degrades to the warning below, never a
+        // crashed install (review M3); line endings are normalized so a CRLF-written
+        // exclude still dedupes against our LF block
+        const existing = existsSync(exclude)
+          ? readFileSync(exclude, "utf8").replace(/\r\n/g, "\n")
+          : "";
+        if (!existing.includes(block)) {
           appendFileSync(exclude, `\n${block}\n`);
           console.log(
             `[closegraph] ${basename(snapshotOut)} is not git-ignored — added it to .git/info/exclude (local only; your worktree stays clean)`,
           );
-        } catch {
-          console.error(
-            `[closegraph] warning: ${basename(snapshotOut)} is not git-ignored and .git/info/exclude is not writable — add it to your .gitignore or it will show as untracked`,
-          );
         }
+      } catch {
+        console.error(
+          `[closegraph] warning: ${basename(snapshotOut)} is not git-ignored and .git/info/exclude is not writable — add it to your .gitignore or it will show as untracked`,
+        );
       }
     }
     process.exit(0);
