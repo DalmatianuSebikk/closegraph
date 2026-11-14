@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { indexRepo } from "../indexer/pipeline.js";
+import { indexRepo, UnindexableRootError } from "../indexer/pipeline.js";
 import type { IndexMetrics, LanguageRunMetrics } from "../indexer/pipeline.js";
 import { isStale, restoreSnapshot, takeSnapshot } from "../graph/snapshot.js";
 import type { SnapshotData } from "../graph/snapshot.js";
@@ -133,7 +133,15 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
 
   async function build(progress?: (msg: string) => void): Promise<GraphHandle> {
     progress?.(`[closegraph] indexing ${root}`);
-    const result = await indexRepo(root);
+    let result;
+    try {
+      result = await indexRepo(root);
+    } catch (error) {
+      // an unindexable ROOT (home / filesystem root) is a session-shape problem,
+      // not an index crash: degrade to the typed unavailable payload, not a 500
+      if (error instanceof UnindexableRootError) throw new GraphUnavailableError(error.message);
+      throw error;
+    }
     if (result.metrics.files === 0) {
       throw new GraphUnavailableError(
         `no indexable files in ${root} — closegraph indexes TypeScript/JavaScript plus python, php and bash pack files`,

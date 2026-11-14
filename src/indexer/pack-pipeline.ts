@@ -86,7 +86,8 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
   const notes: string[] = [];
 
   for (const pack of allPacks()) {
-    const files = discoverPackFiles(repoRoot, pack);
+    const { files, walkErrors } = discoverPackFiles(repoRoot, pack);
+    for (const walkError of walkErrors) notes.push(`walk skipped unreadable directory: ${walkError}`);
     if (files.length === 0) continue; // lazy: no files ⇒ no grammar load
 
     let parse;

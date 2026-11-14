@@ -5,7 +5,7 @@
  * declares a shebang pattern — by the FIRST LINE of an extensionless file.
  * `.ts`/`.tsx` are never claimed here: that is ts-morph's territory.
  */
-import { closeSync, openSync, readSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { LanguagePack } from "./types.js";
 
@@ -27,7 +27,54 @@ export const SKIP_DIR_NAMES: readonly string[] = [
   "AppData",
   "$RECYCLE.BIN",
   "System Volume Information",
+  // macOS TCC-protected media dirs + trash: reading them prompts the user and
+  // denies with EPERM (the Ghostty/opencode-serve consent incident). Segment-
+  // matched like the rest — a repo genuinely containing e.g. a "Music" folder
+  // trades that folder for never prompting on ~/Music.
+  "Music",
+  "Movies",
+  "Pictures",
+  ".Trash",
 ];
+
+export interface ScanResult {
+  entries: string[];
+  /** one entry per directory that could not be READ (EPERM/EACCES/…): that
+   *  directory is skipped and the walk continues everywhere else — a partial
+   *  walk with reasons, never a thrown index. */
+  walkErrors: string[];
+}
+
+const SKIP_DIRS = new Set(SKIP_DIR_NAMES);
+
+/** Recursive file walk with per-directory fault isolation. Dot-names are pruned
+ *  (parity with Bun.Glob's default dot:false — the previous walker) and
+ *  SKIP_DIR_NAMES are pruned during traversal; symlinked directories are not
+ *  followed (cycle safety). `matches` receives the repo-relative posix path. */
+export function scanRepoFiles(repoRoot: string, matches: (relPath: string) => boolean): ScanResult {
+  const entries: string[] = [];
+  const walkErrors: string[] = [];
+  const visit = (absDir: string, relDir: string): void => {
+    let dirents: import("node:fs").Dirent[];
+    try {
+      dirents = readdirSync(absDir, { withFileTypes: true });
+    } catch (error) {
+      walkErrors.push(`${relDir === "" ? "." : relDir} (${error instanceof Error ? error.message : String(error)})`);
+      return;
+    }
+    for (const dirent of dirents) {
+      if (dirent.name.startsWith(".")) continue;
+      const rel = relDir === "" ? dirent.name : `${relDir}/${dirent.name}`;
+      if (dirent.isDirectory()) {
+        if (!SKIP_DIRS.has(dirent.name)) visit(join(absDir, dirent.name), rel);
+      } else if (matches(rel)) {
+        entries.push(rel);
+      }
+    }
+  };
+  visit(repoRoot, "");
+  return { entries, walkErrors };
+}
 
 /** Claims a first line as a bash-family interpreter line: bash or sh, direct or
  *  via env (incl. `env -S`). Deliberately narrow — perl, python3, zsh, and dash
@@ -72,13 +119,10 @@ export function fileExtension(relPath: string): string {
 
 /** Repo-relative posix paths (sorted) of every file this pack owns under repoRoot:
  *  extension matches, plus extensionless files claimed by the pack's shebang. */
-export function discoverPackFiles(repoRoot: string, pack: LanguagePack): string[] {
-  const skip = new Set(SKIP_DIR_NAMES);
+export function discoverPackFiles(repoRoot: string, pack: LanguagePack): { files: string[]; walkErrors: string[] } {
   const out: string[] = [];
-  for (const entry of new Bun.Glob("**/*").scanSync({ cwd: repoRoot })) {
-    const segments = entry.split(/[\\/]/);
-    if (segments.some((segment) => skip.has(segment))) continue;
-    const rel = segments.join("/");
+  const { entries, walkErrors } = scanRepoFiles(repoRoot, () => true);
+  for (const rel of entries) {
     const ext = fileExtension(rel);
     if (pack.extensions.includes(ext)) {
       out.push(rel);
@@ -89,5 +133,5 @@ export function discoverPackFiles(repoRoot: string, pack: LanguagePack): string[
       if (firstLine !== undefined && pack.shebang.test(firstLine)) out.push(rel);
     }
   }
-  return out.sort();
+  return { files: out.sort(), walkErrors };
 }

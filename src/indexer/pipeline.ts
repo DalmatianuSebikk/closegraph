@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, parse, resolve } from "node:path";
 import { Project, SyntaxKind } from "ts-morph";
 import type { GraphStore } from "../graph/store.js";
 import { createMemoryStore } from "../graph/memory.js";
@@ -8,9 +9,25 @@ import { makeNodeId } from "../graph/types.js";
 import type { CallMetrics, ReExportMap } from "./extract.js";
 import { collectReExportMap, extractFile } from "./extract.js";
 import { resolveImports } from "./resolve.js";
-import { SKIP_DIR_NAMES } from "../packs/discover.js";
+import { scanRepoFiles } from "../packs/discover.js";
 import { registerPacks } from "../packs/index.js";
 import { runPackPasses } from "./pack-pipeline.js";
+
+/** Thrown by indexRepo when the root is the user's home directory or the
+ *  filesystem root: with the allowJs fallback such a root walks the ENTIRE
+ *  home/volume (TCC prompts, EPERM-prone dirs, hundreds of thousands of files).
+ *  Graph-service maps this to GraphUnavailableError; the CLI surfaces it as-is. */
+export class UnindexableRootError extends Error {
+  constructor(root: string) {
+    super(`closegraph refuses to index ${root} — point it at a project directory (home and filesystem roots are unbounded)`);
+    this.name = "UnindexableRootError";
+  }
+}
+
+function assertIndexableRoot(repoRoot: string): void {
+  const abs = resolve(repoRoot);
+  if (abs === parse(abs).root || abs === homedir()) throw new UnindexableRootError(abs);
+}
 
 /** Per-language roll-up of one merged index run. inferred counts cross-file
  *  pack resolutions only (ts-morph edges are never inferred); external counts
@@ -43,25 +60,20 @@ export interface IndexResult {
   notes: string[];
 }
 
-const SKIPPED_DIRS = new Set(SKIP_DIR_NAMES); // shared with pack discovery — vendor/ joins the TS pass here
-const TS_SOURCE_GLOB = "**/*.{ts,tsx}";
-const ALLOWJS_SOURCE_GLOB = "**/*.{ts,tsx,js,jsx,mjs,cjs}";
+const TS_SOURCE_RE = /\.(ts|tsx)$/;
+const ALLOWJS_SOURCE_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
 
 /** True for files the allowJs glob admits as JavaScript (not .ts/.tsx). */
 function isJsFile(relPath: string): boolean {
   return /\.(js|jsx|mjs|cjs)$/.test(relPath);
 }
 
-/** Repo-relative posix paths of all indexable source files, deterministic order. */
-function globSourceFiles(repoRoot: string, glob: string): string[] {
-  const scanner = new Bun.Glob(glob);
-  const out: string[] = [];
-  for (const entry of scanner.scanSync({ cwd: repoRoot })) {
-    const segments = entry.split(/[\\/]/);
-    if (segments.some((segment) => SKIPPED_DIRS.has(segment))) continue;
-    out.push(segments.join("/"));
-  }
-  return out.sort();
+/** Repo-relative posix paths of all indexable source files, deterministic order.
+ *  Unreadable directories are skipped with reasons (walkErrors) instead of
+ *  aborting the index — one EPERM dir must not 500 the whole files RPC. */
+function globSourceFiles(repoRoot: string, sourceRe: RegExp): { relPaths: string[]; walkErrors: string[] } {
+  const { entries, walkErrors } = scanRepoFiles(repoRoot, (rel) => sourceRe.test(rel));
+  return { relPaths: entries.sort(), walkErrors };
 }
 
 export interface PreparedProject {
@@ -74,6 +86,9 @@ export interface PreparedProject {
    *  ts-morph throws on unreadable files and would kill the whole pass, so they
    *  are filtered out here and surfaced as notes by the caller (live hotfix). */
   unreadable: { relPath: string; reason: string }[];
+  /** one entry per directory the walk could not read (before per-file filtering)
+   *  — those subtrees are absent from the index, surfaced as a note. */
+  walkErrors: string[];
 }
 
 /** Glob + one shared Project (repo tsconfig when present) + precomputed re-export map.
@@ -83,7 +98,7 @@ export interface PreparedProject {
 export function prepareProject(repoRoot: string): PreparedProject {
   const tsconfigPath = join(repoRoot, "tsconfig.json");
   const hasTsconfig = existsSync(tsconfigPath);
-  const globbed = globSourceFiles(repoRoot, hasTsconfig ? TS_SOURCE_GLOB : ALLOWJS_SOURCE_GLOB);
+  const { relPaths: globbed, walkErrors } = globSourceFiles(repoRoot, hasTsconfig ? TS_SOURCE_RE : ALLOWJS_SOURCE_RE);
 
   // per-FILE read isolation for the ts-morph side (live hotfix): an unreadable
   // file must skip itself with a note, not 500 the whole index. Checked BEFORE
@@ -107,15 +122,16 @@ export function prepareProject(repoRoot: string): PreparedProject {
   const missing = relPaths.filter((rel) => project.getSourceFile(join(repoRoot, rel)) === undefined);
   if (missing.length > 0) project.addSourceFilesAtPaths(missing.map((rel) => join(repoRoot, rel)));
 
-  return { project, relPaths, reExported: collectReExportMap(project), hasTsconfig, unreadable };
+  return { project, relPaths, reExported: collectReExportMap(project), hasTsconfig, unreadable, walkErrors };
 }
 
 /** The ts-morph pass over TypeScript/JavaScript files (the pre-pack pipeline body). */
 export function indexTsRepo(repoRoot: string): IndexResult {
   const startedAt = performance.now();
-  const { project, relPaths, reExported, hasTsconfig, unreadable } = prepareProject(repoRoot);
+  const { project, relPaths, reExported, hasTsconfig, unreadable, walkErrors } = prepareProject(repoRoot);
   const store = createMemoryStore();
   const notes = unreadable.map(({ relPath, reason }) => `file skipped: ${relPath} (${reason})`);
+  if (walkErrors.length > 0) notes.push(`walk skipped unreadable directories: ${walkErrors.join("; ")}`);
   const metrics: IndexResult["metrics"] = {
     callSites: 0,
     resolved: 0,
@@ -189,6 +205,7 @@ export function indexTsRepo(repoRoot: string): IndexResult {
  */
 export async function indexRepo(repoRoot: string): Promise<IndexResult> {
   const startedAt = performance.now();
+  assertIndexableRoot(repoRoot);
   registerPacks();
   const result = indexTsRepo(repoRoot);
   const { store } = result;
