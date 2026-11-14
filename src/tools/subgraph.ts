@@ -1,5 +1,6 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
+import { toolService, type ToolServices } from "./service-pool.js";
 import { resolveRef, type Resolution } from "./resolve-ref.js";
 import { capLines, capList, clampDepth, graphMeta, groupByFile, stalenessNoteLines } from "./render-utils.js";
 
@@ -34,7 +35,7 @@ function renderRefMiss(ref: string, res: Resolution): string {
 const STORE_DIRECTION = { out: "callees", in: "callers", any: "both" } as const;
 
 /** closegraph_subgraph: bounded ego graph around 1–5 seed symbols. */
-export function createSubgraphTool(service: GraphService): Info {
+export function createSubgraphTool(services: ToolServices): Info {
   return {
     name: "closegraph_subgraph",
     description:
@@ -88,7 +89,9 @@ export function createSubgraphTool(service: GraphService): Info {
 
       let handle: GraphHandle;
       try {
-        handle = await service.get((msg) => void ctx.progress({ message: msg }));
+        // shared services: resolve the calling session's root first (plain
+        // services pass straight through — Plan-2 single-project behavior)
+        handle = await (await toolService(services, ctx.sessionID)).get((msg) => void ctx.progress({ message: msg }));
       } catch (error) {
         if (error instanceof GraphUnavailableError) {
           return { content: `graph unavailable: ${error.message}` };

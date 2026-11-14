@@ -1,6 +1,7 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import type { GraphNode } from "../graph/types.js";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
+import { toolService, type ToolServices } from "./service-pool.js";
 import { renderMatches, resolveRef } from "./resolve-ref.js";
 import { capList, graphMeta, stalenessNoteLines } from "./render-utils.js";
 
@@ -78,7 +79,7 @@ function renderRefCard(handle: GraphHandle, ref: string): RefCard {
 }
 
 /** closegraph_query: facts for 1–10 symbols, resolved by qualifiedName, bare name, or file path. */
-export function createQueryTool(service: GraphService): Info {
+export function createQueryTool(services: ToolServices): Info {
   return {
     name: "closegraph_query",
     description:
@@ -123,7 +124,9 @@ export function createQueryTool(service: GraphService): Info {
 
       let handle: GraphHandle;
       try {
-        handle = await service.get((msg) => void ctx.progress({ message: msg }));
+        // shared services: resolve the calling session's root first (plain
+        // services pass straight through — Plan-2 single-project behavior)
+        handle = await (await toolService(services, ctx.sessionID)).get((msg) => void ctx.progress({ message: msg }));
       } catch (error) {
         if (error instanceof GraphUnavailableError) {
           return { content: `graph unavailable: ${error.message}` };

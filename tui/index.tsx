@@ -27,17 +27,20 @@ import type {
  * in-host) — do NOT register ensureSolidTransformPlugin() here.
  */
 
-/** One rpc bridge helper: thrown bridge errors become the typed unavailable payload. */
+/** One rpc bridge helper: thrown bridge errors become the typed unavailable payload.
+ *  Every call carries THIS TUI's directory as `root` — a shared service cannot know
+ *  it otherwise (RpcCallContext = {signal, error}; the payload is the only channel);
+ *  the server resolves one graph per root from it. */
 function unavailable(err: unknown): UnavailablePayload {
   return { error: "unavailable", message: err instanceof Error ? err.message : String(err) }
 }
 
 type Client = ReturnType<typeof usePlugin>["client"]
 
-function filesViaRpc(client: Client): () => Promise<FilesPayload> {
+function filesViaRpc(client: Client, root: string): () => Promise<FilesPayload> {
   return async () => {
     try {
-      const result = await client.rpc.call({ rpcID: "closegraph", method: "files", input: {} })
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "files", input: { root } })
       return result.output as FilesPayload
     } catch (err) {
       return unavailable(err)
@@ -45,10 +48,10 @@ function filesViaRpc(client: Client): () => Promise<FilesPayload> {
   }
 }
 
-function fileSymbolsViaRpc(client: Client): (file: string) => Promise<FileSymbolsPayload> {
+function fileSymbolsViaRpc(client: Client, root: string): (file: string) => Promise<FileSymbolsPayload> {
   return async (file: string) => {
     try {
-      const result = await client.rpc.call({ rpcID: "closegraph", method: "fileSymbols", input: { file } })
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "fileSymbols", input: { file, root } })
       return result.output as FileSymbolsPayload
     } catch (err) {
       return unavailable(err)
@@ -56,10 +59,10 @@ function fileSymbolsViaRpc(client: Client): (file: string) => Promise<FileSymbol
   }
 }
 
-function nodeDetailViaRpc(client: Client): (ref: string) => Promise<NodeDetailPayload> {
+function nodeDetailViaRpc(client: Client, root: string): (ref: string) => Promise<NodeDetailPayload> {
   return async (ref: string) => {
     try {
-      const result = await client.rpc.call({ rpcID: "closegraph", method: "nodeDetail", input: { ref } })
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "nodeDetail", input: { ref, root } })
       return result.output as NodeDetailPayload
     } catch (err) {
       return unavailable(err)
@@ -67,10 +70,10 @@ function nodeDetailViaRpc(client: Client): (ref: string) => Promise<NodeDetailPa
   }
 }
 
-function paletteSearchViaRpc(client: Client): (prefix: string, limit: number) => Promise<PaletteSearchPayload> {
+function paletteSearchViaRpc(client: Client, root: string): (prefix: string, limit: number) => Promise<PaletteSearchPayload> {
   return async (prefix: string, limit: number) => {
     try {
-      const result = await client.rpc.call({ rpcID: "closegraph", method: "paletteSearch", input: { prefix, limit } })
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "paletteSearch", input: { prefix, limit, root } })
       return result.output as PaletteSearchPayload
     } catch (err) {
       return unavailable(err)
@@ -250,8 +253,11 @@ async function runAskAgent(context: ReturnType<typeof usePlugin>, prompt: string
 
 function CodeGraphRoute() {
   const context = usePlugin()
-  const fileMap = createFileMapModel({ files: filesViaRpc(context.client) })
-  const palette = createPaletteModel({ search: paletteSearchViaRpc(context.client) })
+  // this TUI session's directory rides every rpc call as `root` (shared services
+  // resolve one graph per root — the server cannot know it from its own context)
+  const sessionRoot = context.location?.directory ?? ""
+  const fileMap = createFileMapModel({ files: filesViaRpc(context.client, sessionRoot) })
+  const palette = createPaletteModel({ search: paletteSearchViaRpc(context.client, sessionRoot) })
   const [mapState, setMapState] = createSignal<FileMapState>(fileMap.state())
   const [paletteState, setPaletteState] = createSignal<PaletteState>(palette.state())
   const [screens, setScreens] = createSignal<Screen[]>([])
@@ -279,14 +285,14 @@ function CodeGraphRoute() {
   })
 
   function pushSymbols(fileRef: string): void {
-    const model = createSymbolViewModel({ fileRef, fileSymbols: fileSymbolsViaRpc(context.client) })
+    const model = createSymbolViewModel({ fileRef, fileSymbols: fileSymbolsViaRpc(context.client, sessionRoot) })
     const [state, setState] = createSignal<SymbolViewState>(model.state())
     setScreens([...screens(), { kind: "symbols", fileRef, model, state, sync: () => setState(model.state()) }])
     void model.load().then(() => setState(model.state()))
   }
 
   function pushDetail(ref: string): void {
-    const model = createDetailModel({ ref, nodeDetail: nodeDetailViaRpc(context.client) })
+    const model = createDetailModel({ ref, nodeDetail: nodeDetailViaRpc(context.client, sessionRoot) })
     const [state, setState] = createSignal<DetailState>(model.state())
     setScreens([...screens(), { kind: "detail", ref, model, state, sync: () => setState(model.state()) }])
     void model.load().then(() => setState(model.state()))

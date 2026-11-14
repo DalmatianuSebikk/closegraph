@@ -1,5 +1,6 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
+import { toolService, type ToolServices } from "./service-pool.js";
 import { capList, graphMeta, stalenessNoteLines } from "./render-utils.js";
 import { riskBucket } from "../view/risk.js";
 // shared entry-reach (Batch B review R-A): one implementation, exported by the rpc side
@@ -144,7 +145,7 @@ function renderReport(handle: GraphHandle, data: ReportData): string {
 }
 
 /** closegraph_report: one-call graph overview — counts, resolution, fan-in hubs, entry points. */
-export function createReportTool(service: GraphService): Info {
+export function createReportTool(services: ToolServices): Info {
   return {
     name: "closegraph_report",
     description:
@@ -155,7 +156,9 @@ export function createReportTool(service: GraphService): Info {
     async execute(_input: Record<string, never>, ctx) {
       let handle: GraphHandle;
       try {
-        handle = await service.get((msg) => void ctx.progress({ message: msg }));
+        // shared services: resolve the calling session's root first (plain
+        // services pass straight through — Plan-2 single-project behavior)
+        handle = await (await toolService(services, ctx.sessionID)).get((msg) => void ctx.progress({ message: msg }));
       } catch (error) {
         if (error instanceof GraphUnavailableError) {
           return { content: `graph unavailable: ${error.message}` };

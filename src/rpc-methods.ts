@@ -5,6 +5,7 @@
  */
 import type { GraphHandle, GraphService } from "./tools/graph-service.js";
 import { GraphUnavailableError } from "./tools/graph-service.js";
+import type { GraphServicePool } from "./tools/service-pool.js";
 import { resolveRef } from "./tools/resolve-ref.js";
 import { riskBucket, riskExplain, type RiskFacts } from "./view/risk.js";
 import { buildPaletteIndex, type PaletteIndex } from "./view/palette-index.js";
@@ -38,6 +39,13 @@ function optionalNumberField(input: unknown, key: string): number | undefined {
   const value = (input as Record<string, unknown>)[key];
   if (value === undefined) return undefined;
   if (typeof value !== "number") throw new TypeError(`rpc input "${key}" must be a number`);
+  return value;
+}
+
+function optionalStringField(input: unknown, key: string): string | undefined {
+  const value = (input as Record<string, unknown>)[key];
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string") throw new TypeError(`rpc input "${key}" must be a string`);
   return value;
 }
 
@@ -197,14 +205,25 @@ function byQualifiedName(a: { qualifiedName: string }, b: { qualifiedName: strin
   return a.qualifiedName < b.qualifiedName ? -1 : a.qualifiedName > b.qualifiedName ? 1 : 0;
 }
 
-export function createRpcHandlers(service: GraphService): {
+/**
+ * Handlers accept a single GraphService (single-project hosts — unchanged
+ * behavior) or a GraphServicePool (shared services): every call resolves the
+ * service from its OPTIONAL `root` payload, defaulting to the setup root. A
+ * HOME/filesystem-root payload hits the same per-root guard as a direct build
+ * and degrades to the typed unavailable payload, never a 500.
+ */
+export function createRpcHandlers(services: GraphService | GraphServicePool): {
   files: Handler<FilesPayload>;
   fileSymbols: Handler<FileSymbolsPayload>;
   nodeDetail: Handler<NodeDetailPayload>;
   paletteSearch: Handler<PaletteSearchPayload>;
 } {
-  async function guard<T>(fn: (handle: GraphHandle) => T | Promise<T>): Promise<T | UnavailablePayload> {
+  const resolveService =
+    "resolve" in services ? (root: string | undefined) => services.resolve(root) : () => services as GraphService;
+
+  async function guard<T>(input: unknown, fn: (handle: GraphHandle) => T | Promise<T>): Promise<T | UnavailablePayload> {
     try {
+      const service = resolveService(optionalStringField(input, "root"));
       return await fn(await service.get());
     } catch (err) {
       if (err instanceof GraphUnavailableError) return { error: "unavailable", message: err.message };
@@ -214,14 +233,14 @@ export function createRpcHandlers(service: GraphService): {
 
   return {
     async files(_input, _ctx) {
-      return guard((handle) => ({
+      return guard(_input, (handle) => ({
         ...provenance(handle),
         files: summariesFor(handle),
       }));
     },
 
     async fileSymbols(input, _ctx) {
-      return guard((handle) => {
+      return guard(input, (handle) => {
         const file = handle.store.getNode(`File:${stringField(input, "file")}`);
         if (file === undefined) return { ...provenance(handle), symbols: [] };
         const symbols = handle.store
@@ -234,7 +253,7 @@ export function createRpcHandlers(service: GraphService): {
     },
 
     async nodeDetail(input, _ctx) {
-      return guard((handle) => {
+      return guard(input, (handle) => {
         const resolution = resolveRef(handle, stringField(input, "ref"));
         if (resolution.node === undefined) {
           return {
@@ -265,7 +284,7 @@ export function createRpcHandlers(service: GraphService): {
     },
 
     async paletteSearch(input, _ctx) {
-      return guard((handle) => ({
+      return guard(input, (handle) => ({
         ...provenance(handle),
         matches: paletteFor(handle)
           .search(stringField(input, "prefix"), optionalNumberField(input, "limit") ?? 20)

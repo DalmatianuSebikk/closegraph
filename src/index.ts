@@ -2,7 +2,7 @@ import { Plugin } from "@opencode/plugin";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import type { Info } from "@opencode/plugin/promise/tool";
 import { homedir } from "node:os";
-import { createGraphService, type GraphService } from "./tools/graph-service.js";
+import { createGraphServicePool, type ToolServiceScope, type ToolServices } from "./tools/service-pool.js";
 import { createQueryTool } from "./tools/query.js";
 import { createBlastRadiusTool } from "./tools/blast-radius.js";
 import { createSubgraphTool } from "./tools/subgraph.js";
@@ -28,9 +28,10 @@ export function pickGraphRoot(projectDir: string, sessionDir: string | undefined
   return sessionDir.startsWith(prefix) && sessionDir !== projectDir ? sessionDir : projectDir;
 }
 
-/** The plugin's four tools, each bound to the given service (factory form so ctx root + storage flow through). */
-export function createTools(service: GraphService): Info[] {
-  return [createQueryTool(service), createBlastRadiusTool(service), createSubgraphTool(service), createReportTool(service)];
+/** The plugin's four tools, each bound to the given services (factory form so ctx root + storage flow through).
+ *  Accepts a plain GraphService (single project) or a ToolServiceScope (shared services — per-session roots). */
+export function createTools(services: ToolServices): Info[] {
+  return [createQueryTool(services), createBlastRadiusTool(services), createSubgraphTool(services), createReportTool(services)];
 }
 
 export default Plugin.define({
@@ -42,12 +43,30 @@ export default Plugin.define({
       return;
     }
 
-    const service = createGraphService(
-      pickGraphRoot(context.location.project.directory, context.location.directory, homedir()),
-      context.storage,
-    );
+    // SHARED SERVICES (live follow-up #2): setup() runs once per service and its
+    // location cannot reflect every TUI session's directory — d7e3301's setup-time
+    // root therefore bound ALL sessions to one root (HOME on this user's host).
+    // The default stays the pickGraphRoot choice; every rpc call now carries the
+    // TUI's own directory as `root`, and tools resolve their sessionID's directory
+    // through session.get — both route through this LRU pool per root.
+    const graphRoot = pickGraphRoot(context.location.project.directory, context.location.directory, homedir());
+    const pool = createGraphServicePool(graphRoot, context.storage);
+    const sessionDirectories = new Map<string, string>();
+    const scope: ToolServiceScope = {
+      pool,
+      async sessionDirectory(sessionID) {
+        // one host lookup per session, cached — session directories are stable
+        const cached = sessionDirectories.get(sessionID);
+        if (cached !== undefined) return cached;
+        const info = await context.session.get({ sessionID });
+        const directory = info.location?.directory;
+        if (directory !== undefined) sessionDirectories.set(sessionID, directory);
+        return directory;
+      },
+    };
+
     const reg = await context.tool.transform((editor) => {
-      for (const tool of createTools(service)) editor.add(tool);
+      for (const tool of createTools(scope)) editor.add(tool);
     });
     // confirm through the live registry, not just what we pushed
     const registered = await context.tool.list();
@@ -56,7 +75,7 @@ export default Plugin.define({
     if (names.length === 0) {
       console.error("[closegraph] no tools registered — transform did not apply?");
     }
-    const rpcReg = await context.rpc.register(closegraphRpc, createRpcHandlers(service));
+    const rpcReg = await context.rpc.register(closegraphRpc, createRpcHandlers(pool));
     console.log(`[closegraph] registered rpc methods: ${Object.keys(closegraphRpc.methods).join(", ")}`);
     return () => {
       reg.dispose();

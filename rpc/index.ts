@@ -68,22 +68,37 @@ export type PaletteSearchPayload = (Provenance & { matches: PaletteMatch[] }) | 
 
 const object = { type: "object" } as const;
 
+/** Optional per-call graph root (shared services): the TUI sends its own
+ *  directory; the server resolves one GraphService per root. Optional so
+ *  legacy callers without a root keep the setup-default service. */
+const rootProperty = { root: { type: "string" } } as const;
+
 export const closegraphRpc = {
   id: "closegraph",
   methods: {
-    files: { input: object, output: object },
+    files: { input: { type: "object", properties: { ...rootProperty }, additionalProperties: false }, output: object },
     fileSymbols: {
-      input: { type: "object", properties: { file: { type: "string" } }, required: ["file"], additionalProperties: false },
+      input: {
+        type: "object",
+        properties: { file: { type: "string" }, ...rootProperty },
+        required: ["file"],
+        additionalProperties: false,
+      },
       output: object,
     },
     nodeDetail: {
-      input: { type: "object", properties: { ref: { type: "string" } }, required: ["ref"], additionalProperties: false },
+      input: {
+        type: "object",
+        properties: { ref: { type: "string" }, ...rootProperty },
+        required: ["ref"],
+        additionalProperties: false,
+      },
       output: object,
     },
     paletteSearch: {
       input: {
         type: "object",
-        properties: { prefix: { type: "string" }, limit: { type: "number" } },
+        properties: { prefix: { type: "string" }, limit: { type: "number" }, ...rootProperty },
         required: ["prefix"],
         additionalProperties: false,
       },

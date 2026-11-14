@@ -1,5 +1,6 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
+import { toolService, type ToolServices } from "./service-pool.js";
 import { renderMatches, resolveRef } from "./resolve-ref.js";
 import { capLines, capList, clampDepth, graphMeta, groupByFile, stalenessNoteLines } from "./render-utils.js";
 
@@ -36,7 +37,7 @@ function affectedIds(handle: GraphHandle, seedId: string, direction: "callers" |
 }
 
 /** closegraph_blast_radius: transitive impact of one symbol — everything that can break when it changes. */
-export function createBlastRadiusTool(service: GraphService): Info {
+export function createBlastRadiusTool(services: ToolServices): Info {
   return {
     name: "closegraph_blast_radius",
     description:
@@ -83,7 +84,9 @@ export function createBlastRadiusTool(service: GraphService): Info {
     async execute(input: BlastRadiusInput, ctx) {
       let handle: GraphHandle;
       try {
-        handle = await service.get((msg) => void ctx.progress({ message: msg }));
+        // shared services: resolve the calling session's root first (plain
+        // services pass straight through — Plan-2 single-project behavior)
+        handle = await (await toolService(services, ctx.sessionID)).get((msg) => void ctx.progress({ message: msg }));
       } catch (error) {
         if (error instanceof GraphUnavailableError) {
           return { content: `graph unavailable: ${error.message}` };
