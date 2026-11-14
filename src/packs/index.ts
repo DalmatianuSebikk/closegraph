@@ -5,10 +5,11 @@
  */
 import { registerPack } from "./registry.js";
 import { pythonPack } from "./python.js";
+import { phpPack } from "./php.js";
 
 /** Registers every built-in language pack (idempotent — safe to call repeatedly). */
 export function registerPacks(): void {
   registerPack(pythonPack);
-  // Task 6: registerPack(phpPack);
+  registerPack(phpPack);
   // Task 7: registerPack(bashPack);
 }
