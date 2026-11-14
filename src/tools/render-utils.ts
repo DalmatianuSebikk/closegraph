@@ -24,8 +24,11 @@ export function capList(items: string[], max: number): { shown: string[]; hidden
 
 /** Group qualified names by file, one line per file: `src/lib/util.ts: formatName, shout`.
  *  A File node's qualifiedName has no # — the file IS the name, so it never re-prints
- *  as a member of its own group; a file-only group renders as the bare path (review M1). */
+ *  as a member of its own group; a file-only group renders as the bare path (review M1).
+ *  Code-unit ordering (no localeCompare — final review M5): same-graph ⇒ same output
+ *  on every machine, matching report.ts/rpc-methods.ts and keeping output bytes stable. */
 export function groupByFile(qualifiedNames: string[]): string[] {
+  const byUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
   const byFile = new Map<string, string[]>();
   for (const qualifiedName of qualifiedNames) {
     const hash = qualifiedName.indexOf("#");
@@ -40,9 +43,9 @@ export function groupByFile(qualifiedNames: string[]): string[] {
     else names.push(bare);
   }
   return [...byFile.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => byUnit(a, b))
     .map(([file, names]) =>
-      names.length === 0 ? file : `${file}: ${names.sort((a, b) => a.localeCompare(b)).join(", ")}`,
+      names.length === 0 ? file : `${file}: ${names.sort(byUnit).join(", ")}`,
     );
 }
 

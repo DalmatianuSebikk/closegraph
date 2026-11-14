@@ -124,12 +124,16 @@ export function createBlastRadiusTool(service: GraphService): Info {
       const header = `blast radius: ${node.qualifiedName} (${scope}) — ${affected.length} affected`;
       const { shown, hidden } = capList(affected, limit);
       const more = hidden > 0 ? [`… +${hidden} more${raise}`] : [];
-      // ...and its line-cap notice offers the bounded-view tool instead of a no-op depth narrowing
+      // the beyond-limit pointer goes BEFORE the groups so it survives the outer line
+      // cap (final review M4): with 250 nodes at limit 200 the pointer (50 symbols)
+      // and the line-cap notice (3 dropped lines) each stay visible, and the counts
+      // reconcile in both units (197 shown + 3 line-dropped + 50 beyond-limit = 250)
+      // ...and the line-cap notice offers the bounded-view tool instead of a no-op depth narrowing
       const notice =
         direction === "callers"
           ? (omitted: number) => `(truncated, ${omitted} more — ${raise === "" ? "" : "raise limit or "}use closegraph_subgraph for a bounded view)`
           : (omitted: number) => `(truncated, ${omitted} more — ${raise === "" ? "narrow depth or use closegraph_subgraph" : "raise limit, narrow depth, or use closegraph_subgraph"})`;
-      const { lines } = capLines([header, ...note, ...groupByFile(shown), ...more], MAX_LINES, notice);
+      const { lines } = capLines([header, ...note, ...more, ...groupByFile(shown)], MAX_LINES, notice);
 
       return {
         content: lines.join("\n"),

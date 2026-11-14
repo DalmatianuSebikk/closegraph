@@ -24,12 +24,15 @@ function listLine(label: string, nodes: GraphNode[]): string {
   return `${label} (${nodes.length}): ${nodes.map((n) => n.qualifiedName).join(", ")}`;
 }
 
-/** Long lists cost predictable tokens: LIST_SHOWN_MAX lines plus a pointer to the full-set tool. */
+/** Long lists cost predictable tokens: LIST_SHOWN_MAX lines plus a pointer to the
+ *  count-exact tool — blast_radius names the exact totals even when its own tail is capped. */
 function cappedListLines(label: string, nodes: GraphNode[], pointerTool?: string): string[] {
   if (nodes.length <= INLINE_LIST_MAX) return [listLine(label, nodes)];
   const { shown, hidden } = capList(nodes.map((n) => n.qualifiedName), LIST_SHOWN_MAX);
   const pointer =
-    pointerTool === undefined ? `… +${hidden} more` : `… +${hidden} more — use ${pointerTool} for the full set`;
+    pointerTool === undefined
+      ? `… +${hidden} more`
+      : `… +${hidden} more — use ${pointerTool} for the affected set with exact counts`;
   return [`${label} (${nodes.length}):`, ...shown.map((name) => `  ${name}`), pointer];
 }
 
