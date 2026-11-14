@@ -5,12 +5,13 @@ import { createGraphService, type GraphService } from "./tools/graph-service.js"
 import { createQueryTool } from "./tools/query.js";
 import { createBlastRadiusTool } from "./tools/blast-radius.js";
 import { createSubgraphTool } from "./tools/subgraph.js";
+import { createReportTool } from "./tools/report.js";
 import { createRpcHandlers } from "./rpc-methods.js";
 import { closegraphRpc } from "../rpc/index.js";
 
-/** The plugin's three tools, each bound to the given service (factory form so ctx root + storage flow through). */
+/** The plugin's four tools, each bound to the given service (factory form so ctx root + storage flow through). */
 export function createTools(service: GraphService): Info[] {
-  return [createQueryTool(service), createBlastRadiusTool(service), createSubgraphTool(service)];
+  return [createQueryTool(service), createBlastRadiusTool(service), createSubgraphTool(service), createReportTool(service)];
 }
 
 export default Plugin.define({
