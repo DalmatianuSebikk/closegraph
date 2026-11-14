@@ -108,10 +108,22 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
     try {
       const records: FilePass[] = [];
       for (const relPath of files) {
-        const source = await Bun.file(join(repoRoot, relPath)).text();
+        let source: string;
+        try {
+          source = await Bun.file(join(repoRoot, relPath)).text();
+        } catch (error) {
+          // per-FILE isolation (live hotfix): one locked/unreadable file skips
+          // itself with a note — never its whole language, never the index.
+          // The per-pack catch below stays for extract-time failures only.
+          notes.push(`file skipped: ${relPath} (${error instanceof Error ? error.message : String(error)})`);
+          continue;
+        }
         records.push({ relPath, extraction: pack.extract(parse(source), relPath, source) });
       }
-      for (const relPath of files) walked.add(relPath);
+      if (records.length === 0) {
+        continue; // every file was unreadable — notes carry why; no empty language entry
+      }
+      for (const { relPath } of records) walked.add(relPath);
 
       // sinks fold into node dangerousCalls BEFORE the nodes land in the store
       const dangerous = foldSinks(records);

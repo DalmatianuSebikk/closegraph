@@ -11,7 +11,11 @@ import type { LanguagePack } from "./types.js";
 
 /** Directory names never descended into. `vendor` joins the shared skip list here
  *  (pipeline.ts starts consuming this list in Task 8 — the excalidraw before/after
- *  check lands there). */
+ *  check lands there). The OS junk entries exist because a HOME-rooted session
+ *  (no tsconfig.json → packs-only/allowJs fallback) walks a real user home:
+ *  macOS `Library` and Windows `AppData`/`$RECYCLE.BIN`/`System Volume Information`
+ *  carry caches/system state — EPERM-prone and never project source (live-hotfix:
+ *  one Library/Caches read 500'd the whole files RPC). */
 export const SKIP_DIR_NAMES: readonly string[] = [
   "node_modules",
   ".git",
@@ -19,6 +23,10 @@ export const SKIP_DIR_NAMES: readonly string[] = [
   "build",
   "coverage",
   "vendor",
+  "Library",
+  "AppData",
+  "$RECYCLE.BIN",
+  "System Volume Information",
 ];
 
 /** Claims a first line as a bash-family interpreter line: bash or sh, direct or
