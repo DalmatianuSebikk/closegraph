@@ -16,6 +16,12 @@ export function capLines(
   return { lines: [...kept, notice(lines.length - kept.length)], truncated: true };
 }
 
+/** Cap a name list: keep the first `max`, count the rest for the caller's pointer line. */
+export function capList(items: string[], max: number): { shown: string[]; hidden: number } {
+  if (items.length <= max) return { shown: items, hidden: 0 };
+  return { shown: items.slice(0, max), hidden: items.length - max };
+}
+
 /** Provenance of the graph behind a tool result (Ruling 13: staleness must reach the output). */
 export function graphMeta(handle: GraphHandle): { source: GraphHandle["source"]; staleness: GraphHandle["staleness"] } {
   return { source: handle.source, staleness: handle.staleness };

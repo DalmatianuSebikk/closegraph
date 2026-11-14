@@ -2,7 +2,12 @@ import type { Info } from "@opencode/plugin/promise/tool";
 import type { GraphNode } from "../graph/types.js";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { renderMatches, resolveRef } from "./resolve-ref.js";
-import { graphMeta, stalenessNoteLines } from "./render-utils.js";
+import { capList, graphMeta, stalenessNoteLines } from "./render-utils.js";
+
+/** Lists up to this size stay on one comma-joined line; longer ones switch to one per line, capped. */
+const INLINE_LIST_MAX = 24;
+/** Items kept when a long list is capped (pointer line reports the rest). */
+const LIST_SHOWN_MAX = 20;
 
 /** ts-morph stores signatures arrow-style; render them in the friendlier method form. */
 function renderSignature(node: GraphNode): string {
@@ -16,16 +21,25 @@ function listLine(label: string, nodes: GraphNode[]): string {
   return `${label} (${nodes.length}): ${nodes.map((n) => n.qualifiedName).join(", ")}`;
 }
 
+/** Long lists cost predictable tokens: LIST_SHOWN_MAX lines plus a pointer to the full-set tool. */
+function cappedListLines(label: string, nodes: GraphNode[], pointerTool?: string): string[] {
+  if (nodes.length <= INLINE_LIST_MAX) return [listLine(label, nodes)];
+  const { shown, hidden } = capList(nodes.map((n) => n.qualifiedName), LIST_SHOWN_MAX);
+  const pointer =
+    pointerTool === undefined ? `… +${hidden} more` : `… +${hidden} more — use ${pointerTool} for the full set`;
+  return [`${label} (${nodes.length}):`, ...shown.map((name) => `  ${name}`), pointer];
+}
+
 function renderNode(handle: GraphHandle, node: GraphNode): string {
   const lines: string[] = [node.id];
   const facts = [`exported: ${node.exported}`, `file: ${node.filePath}`];
   if (node.signature !== undefined) facts.push(`signature: ${renderSignature(node)}`);
   lines.push(facts.join("  "));
   if (node.kind === "File") {
-    lines.push(listLine("contains", handle.store.nodesOfFile(node.id)));
+    lines.push(...cappedListLines("contains", handle.store.nodesOfFile(node.id)));
   }
-  lines.push(listLine("direct callers", handle.store.callers(node.id)));
-  lines.push(listLine("direct callees", handle.store.callees(node.id)));
+  lines.push(...cappedListLines("direct callers", handle.store.callers(node.id), "closegraph_blast_radius"));
+  lines.push(...cappedListLines("direct callees", handle.store.callees(node.id), "closegraph_blast_radius"));
   return lines.join("\n");
 }
 
@@ -67,7 +81,9 @@ export function createQueryTool(service: GraphService): Info {
         const callees = handle.store.callees(node.id);
         return {
           content: [renderNode(handle, node), ...note].join("\n"),
-          metadata: { node, callers, callees, graph },
+          // metadata is not model-visible (verified from @opencode/schema + @opencode/ai):
+          // content renders both lists, so metadata carries counts only
+          metadata: { node, callerCount: callers.length, calleeCount: callees.length, graph },
         };
       }
       if (candidates.length > 0) {
