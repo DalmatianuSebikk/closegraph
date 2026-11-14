@@ -4,24 +4,29 @@ import { createEffect, createSignal, onMount } from "solid-js"
 import { createFileMapModel, RISK_SHADING, type FileMapState } from "../src/view/file-map-model.js"
 import { createSymbolViewModel, SYMBOL_VIEW_KEYMAP, type SymbolViewState } from "../src/view/symbol-view-model.js"
 import { createDetailModel, DETAIL_KEYMAP, type DetailState } from "../src/view/detail-model.js"
+import { createEgoModel, EGO_KEYMAP, type EgoState } from "../src/view/ego-model.js"
 import { createPaletteModel, PALETTE_KEYMAP, type PaletteState } from "../src/view/palette-model.js"
 import type {
   FilesPayload,
   FileSymbolsPayload,
   NodeDetailPayload,
   PaletteSearchPayload,
+  EgoGraphPayload,
   UnavailablePayload,
 } from "../rpc/index.js"
 
 /**
- * CodeGraph graph route (plan 3 Tasks 4+5). Thin by design: all logic lives in the pure
- * models (src/view/*-model.ts); this layer owns the view stack (file map ⇄ symbol list
- * ⇄ detail), the jump-to-symbol palette overlay, and the ask-agent execution adapter.
+ * CodeGraph graph route (plan 3 Tasks 4+5; ego-graph-view plan Task 5). Thin by
+ * design: all logic lives in the pure models (src/view/*-model.ts); this layer owns
+ * the view stack (file map ⇄ symbol list ⇄ detail ⇄ ego graph), the jump-to-symbol
+ * palette overlay, and the ask-agent execution adapter.
  *
- * Spike deltas applied (docs/superpowers/spikes/tui-render.md): D1 flexbox + no scrollbox
- * (models pre-window rows), D4 selection/risk shading via backgroundColor + text markers
- * only (never border* props), D5 fixed-height text rows, D6 enter matches "enter"|"return"
- * and escape matches "escape"|"esc".
+ * Spike deltas applied (docs/superpowers/spikes/tui-render.md + ego-edges.md):
+ * D1 flexbox + no scrollbox (models pre-window rows), D4 selection/risk shading via
+ * bg + text markers only (never border* props), D5 fixed-height text rows, D6 enter
+ * matches "enter"|"return" and escape matches "escape"|"esc", E7 ego canvas rows are
+ * height-1 flex rows of width-pinned <text> segments (bg — NOT backgroundColor — on
+ * <text>, per E4).
  *
  * The host (opencode ≥2.2.x) applies the Solid transform to this file (Task 4 verified
  * in-host) — do NOT register ensureSolidTransformPlugin() here.
@@ -75,6 +80,17 @@ function paletteSearchViaRpc(client: Client, root: string): (prefix: string, lim
     try {
       const result = await client.rpc.call({ rpcID: "closegraph", method: "paletteSearch", input: { prefix, limit, root } })
       return result.output as PaletteSearchPayload
+    } catch (err) {
+      return unavailable(err)
+    }
+  }
+}
+
+function egoGraphViaRpc(client: Client, root: string): (ref: string) => Promise<EgoGraphPayload> {
+  return async (ref: string) => {
+    try {
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "egoGraph", input: { ref, root } })
+      return result.output as EgoGraphPayload
     } catch (err) {
       return unavailable(err)
     }
@@ -162,6 +178,18 @@ export const MAP_KEYMAP = {
 
 const SYMBOLS_KEYMAP = { ...SYMBOL_VIEW_KEYMAP, palette: ["p"] } as const
 const DETAIL_SCREEN_KEYMAP = { ...DETAIL_KEYMAP, refresh: ["r"], palette: ["p"] } as const
+/** Ego screen chrome: the model keymap spread (columns/rows/re-center/history/refresh)
+ *  + route-only actions. `back` is route-owned on purpose — EGO_KEYMAP has NO escape
+ *  binding (the model words u vs esc apart); `palette` matches the sibling screens.
+ *  Exported for the route-bits keymap tests (MAP_KEYMAP precedent). */
+export const EGO_SCREEN_KEYMAP = { ...EGO_KEYMAP, back: ["escape", "esc"], palette: ["p"] } as const
+
+/** Ego re-centers (enter / click-on-highlighted) start a fire-and-forget load inside
+ *  the Task-4 contract (open(): void; the model's loadSeq guard makes stale loads
+ *  harmless), so the new payload applies with no route-visible handle. Re-sync on a
+ *  short settle timer (E5's ~50 ms family) repaints when it lands; any later
+ *  keypress's screen.sync() is the backstop if an rpc ever outruns the timer. */
+const EGO_SETTLE_MS = 80
 
 interface SymbolsScreen {
   kind: "symbols"
@@ -179,7 +207,15 @@ interface DetailScreen {
   sync: () => void
 }
 
-type Screen = SymbolsScreen | DetailScreen
+interface EgoScreen {
+  kind: "ego"
+  ref: string
+  model: ReturnType<typeof createEgoModel>
+  state: () => EgoState
+  sync: () => void
+}
+
+type Screen = SymbolsScreen | DetailScreen | EgoScreen
 
 /** The picking-relevant slice of SessionInfo (id, parentID?, time.updated, location.directory)
  *  — structurally satisfied by the client type in 2.2.5 and 2.2.7 alike. */
@@ -279,7 +315,7 @@ function CodeGraphRoute() {
     fileMap.resize(next)
     syncMap()
     for (const screen of screens()) {
-      if (screen.kind === "symbols") screen.model.resize(next)
+      if (screen.kind === "symbols" || screen.kind === "ego") screen.model.resize(next)
       syncScreen(screen)
     }
   })
@@ -296,6 +332,21 @@ function CodeGraphRoute() {
     const [state, setState] = createSignal<DetailState>(model.state())
     setScreens([...screens(), { kind: "detail", ref, model, state, sync: () => setState(model.state()) }])
     void model.load().then(() => setState(model.state()))
+  }
+
+  function pushEgo(ref: string): void {
+    const model = createEgoModel({ ref, egoGraph: egoGraphViaRpc(context.client, sessionRoot) })
+    const [state, setState] = createSignal<EgoState>(model.state())
+    setScreens([...screens(), { kind: "ego", ref, model, state, sync: () => setState(model.state()) }])
+    void model.load().then(() => setState(model.state()))
+  }
+
+  /** Repaint an ego screen once a fire-and-forget re-center load has settled (see
+   *  EGO_SETTLE_MS). Skipped if the screen was popped before the timer fires. */
+  const settleEgo = (screen: EgoScreen) => {
+    setTimeout(() => {
+      if (screens().includes(screen)) screen.sync()
+    }, EGO_SETTLE_MS)
   }
 
   const pop = () => setScreens(screens().slice(0, -1))
@@ -417,6 +468,14 @@ function CodeGraphRoute() {
           if (ref !== undefined) pushDetail(ref)
           break
         }
+        case "graph": {
+          key.preventDefault()
+          // Task 5 rider: [g] opens the selected symbol's ego graph (same cursor
+          // the detail push consumes)
+          const ref = screen.model.openSymbol()
+          if (ref !== undefined) pushEgo(ref)
+          break
+        }
         case "back":
           key.preventDefault()
           pop()
@@ -435,7 +494,62 @@ function CodeGraphRoute() {
       return
     }
 
-    // detail panel: [a] ask agent · [b] blast radius (TODO rules plan) · esc back
+    // ego graph: three drawn columns, enter re-centers, u walks the center history
+    // (EGO_SCREEN_KEYMAP = the model keymap + route-only back/palette)
+    if (screen.kind === "ego") {
+      switch (actionFor(EGO_SCREEN_KEYMAP, key)) {
+        case "up":
+          key.preventDefault()
+          screen.model.moveRow(-1)
+          screen.sync()
+          break
+        case "down":
+          key.preventDefault()
+          screen.model.moveRow(1)
+          screen.sync()
+          break
+        case "left":
+          key.preventDefault()
+          screen.model.moveColumn(-1)
+          screen.sync()
+          break
+        case "right":
+          key.preventDefault()
+          screen.model.moveColumn(1)
+          screen.sync()
+          break
+        case "open":
+          key.preventDefault()
+          // neighbor → re-center (history push); center → refresh. The load applies
+          // async (void per the Task-4 contract) — settleEgo repaints when it lands.
+          screen.model.open()
+          screen.sync()
+          settleEgo(screen)
+          break
+        case "backCenter":
+          key.preventDefault()
+          screen.model.backCenter() // cached pop — synchronous state swap, no rpc
+          screen.sync()
+          break
+        case "refresh":
+          key.preventDefault()
+          void screen.model.refresh().then(() => screen.sync())
+          break
+        case "palette":
+          key.preventDefault()
+          openPalette()
+          break
+        case "back":
+          key.preventDefault()
+          pop() // esc pops the SCREEN (distinct from u's center history)
+          break
+        default:
+          break
+      }
+      return
+    }
+
+    // detail panel: [a] ask agent · [b] ego graph · esc back
     switch (actionFor(DETAIL_SCREEN_KEYMAP, key)) {
       case "askAgent":
         key.preventDefault()
@@ -443,9 +557,9 @@ function CodeGraphRoute() {
         break
       case "blastRadius":
         key.preventDefault()
-        // TODO(Plan 4): blast-radius view over transitive callers — the nodeDetail rpc
-        // payload carries direct lists only, so the traversal needs its own method first.
-        console.log(`[closegraph] blast radius for ${screen.model.blastRadius()} — view lands with the rules plan (Plan 4)`)
+        // Task 5 rider: open this node's ego graph (the drawn blast-radius one-hop
+        // view — transitive callers stay closegraph_blast_radius's pointer text)
+        pushEgo(screen.model.blastRadius())
         break
       case "back":
         key.preventDefault()
@@ -481,6 +595,15 @@ function CodeGraphRoute() {
       screen.model.move(index - selectedAt)
       syncScreen(screen)
     }
+  }
+
+  // click parity on the ego canvas (ruling 6): click selects the node; a click on
+  // the ALREADY-highlighted neighbor re-centers (≡ enter) — selectByRef owns both.
+  // A click-triggered re-center loads async, so the settle timer repaints it.
+  const selectEgoNode = (screen: EgoScreen, ref: string) => {
+    screen.model.selectByRef(ref)
+    screen.sync()
+    settleEgo(screen)
   }
 
   const pickPaletteRow = (index: number) => {
@@ -552,7 +675,7 @@ function CodeGraphRoute() {
         ))}
       </box>
       <text width="100%" height={1} flexShrink={0} fg="gray">
-        {"↑/↓ or j/k move · enter open · esc back · r refresh · p jump to symbol"}
+        {"↑/↓ or j/k move · enter open · esc back · r refresh · [g] ego · p jump to symbol"}
       </text>
     </box>
   )
@@ -572,6 +695,48 @@ function CodeGraphRoute() {
       </box>
       <text width="100%" height={1} flexShrink={0} fg="gray">
         {"r refresh · p jump to symbol"}
+      </text>
+    </box>
+  )
+
+  const EgoView = (props: { screen: EgoScreen }) => (
+    <box flexDirection="column" width="100%" height="100%" paddingTop={0} paddingLeft={1} paddingRight={1}>
+      <text width="100%" height={1} flexShrink={0} fg="cyan">
+        {props.screen.state().title}
+      </text>
+      {bannerLine(props.screen.state().banner)}
+      <box flexDirection="column" paddingTop={0} flexGrow={1}>
+        {...props.screen.state().lines.map((line) => (
+          <text width="100%" height={1} flexShrink={0} fg={line.muted ? "gray" : undefined}>
+            {line.text}
+          </text>
+        ))}
+        {(() => {
+          // graph mode paints the canvas: fixed-height flex rows of width-pinned
+          // segments (E7 verbatim; E3: ego-layout pads/truncates so a segment's
+          // text length IS its width). List/miss modes render lines only — the
+          // summary lines above are shared by every mode (honesty rulings).
+          const s = props.screen.state()
+          if (s.mode !== "graph" || s.canvas === undefined) return []
+          return s.canvas.rows.map((row) => (
+            <box flexDirection="row" height={1} flexShrink={0}>
+              {...row.map((seg) => (
+                <text
+                  width={seg.text.length}
+                  height={1}
+                  fg={seg.fg}
+                  bg={seg.bg}
+                  onMouseDown={seg.ref !== undefined ? () => selectEgoNode(props.screen, seg.ref!) : undefined}
+                >
+                  {seg.text}
+                </text>
+              ))}
+            </box>
+          ))
+        })()}
+      </box>
+      <text width="100%" height={1} flexShrink={0} fg="gray">
+        {props.screen.state().footer}
       </text>
     </box>
   )
@@ -611,7 +776,9 @@ function CodeGraphRoute() {
         if (paletteState().open) return <PaletteOverlay />
         const s = top()
         if (s === undefined) return <MapView />
-        return s.kind === "symbols" ? <SymbolsView screen={s} /> : <DetailView screen={s} />
+        if (s.kind === "symbols") return <SymbolsView screen={s} />
+        if (s.kind === "ego") return <EgoView screen={s} />
+        return <DetailView screen={s} />
       })()}
     </box>
   )

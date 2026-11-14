@@ -29,13 +29,16 @@ export interface SymbolViewState {
   cursor: number;
 }
 
-/** Keyboard parity (Review Focus 5): every action has ≥1 key; the render layer dispatches these. */
-export const SYMBOL_VIEW_ACTIONS = ["up", "down", "open", "back", "refresh"] as const;
+/** Keyboard parity (Review Focus 5): every action has ≥1 key; the render layer dispatches these.
+ *  Task 5 rider: `graph` opens the ego graph of the selected symbol (route-only effect —
+ *  the binding lives with the model so the completeness loop pins it). */
+export const SYMBOL_VIEW_ACTIONS = ["up", "down", "open", "graph", "back", "refresh"] as const;
 export type SymbolViewAction = (typeof SYMBOL_VIEW_ACTIONS)[number];
 export const SYMBOL_VIEW_KEYMAP: Record<SymbolViewAction, readonly string[]> = {
   up: ["up", "k"],
   down: ["down", "j"],
   open: ["enter", "return"],
+  graph: ["g"],
   back: ["escape", "esc"],
   refresh: ["r"],
 };

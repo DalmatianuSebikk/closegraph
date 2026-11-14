@@ -28,8 +28,9 @@ export interface DetailState {
   lines: DetailLine[];
 }
 
-/** Rendered actions footer — pinned text; the bracket tokens mirror DETAIL_KEYMAP. */
-export const ACTIONS_LINE = "[a] ask agent  [b] blast radius  [esc] back";
+/** Rendered actions footer — pinned text; the bracket tokens mirror DETAIL_KEYMAP.
+ *  Task 5 rider: [b] opens the ego graph (blastRadius() ref) — key unchanged. */
+export const ACTIONS_LINE = "[a] ask agent  [b] ego graph  [esc] back";
 
 export const DETAIL_ACTIONS = ["askAgent", "blastRadius", "back"] as const;
 export type DetailAction = (typeof DETAIL_ACTIONS)[number];
