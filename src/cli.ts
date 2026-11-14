@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { indexRepo } from "./indexer/pipeline.js";
 import { isStale, restoreSnapshot, takeSnapshot } from "./graph/snapshot.js";
 import type { GraphStore } from "./graph/store.js";
@@ -65,8 +65,22 @@ if (!existsSync(repoPath)) {
 const HOOK_MARKER = "# closegraph post-commit hook";
 
 if (hookMode) {
-  if (!existsSync(join(repoPath, ".git"))) {
+  // hook takes no flags — a silent drop would lie about what ran (review M5)
+  const strayFlags = process.argv.slice(2).filter((a) => a.startsWith("--"));
+  if (strayFlags.length > 0) {
+    console.error(`[closegraph] unknown flag in hook mode: ${strayFlags.join(", ")} — hook takes no flags\n${USAGE}`);
+    process.exit(1);
+  }
+  const gitDir = join(repoPath, ".git");
+  if (!existsSync(gitDir)) {
     console.error(`[closegraph] not a git repo: ${repoPath} — the post-commit hook needs one`);
+    process.exit(1);
+  }
+  // linked worktrees/submodules carry .git as a FILE — mkdir would die on ENOTDIR (review M3)
+  if (statSync(gitDir).isFile()) {
+    console.error(
+      `[closegraph] ${repoPath} looks like a linked worktree or submodule (.git is a file) — install the hook from the main checkout`,
+    );
     process.exit(1);
   }
   mkdirSync(join(repoPath, ".git", "hooks"), { recursive: true });
@@ -79,15 +93,18 @@ if (hookMode) {
     const cliAbs = resolve(import.meta.path);
     // the refresh lands on a *.snapshot.json path — gitignored by the closegraph convention
     const snapshotOut = join(repoPath, "closegraph.snapshot.json");
+    // every path is shell-quoted (spaces survive, review I1) and the re-index is
+    // backgrounded so a commit never blocks on ts-morph (review I2); `|| true`
+    // keeps a missing bun or a crashed index invisible to git either way
     const snippet = [
       "#!/bin/sh",
       `${HOOK_MARKER} — refresh the code-graph snapshot after every commit`,
-      `bun run ${cliAbs} ${repoPath} --snapshot ${snapshotOut} >/dev/null 2>&1 || true`,
+      `bun run "${cliAbs}" "${repoPath}" --snapshot "${snapshotOut}" >/dev/null 2>&1 || true &`,
       "",
     ].join("\n");
     writeFileSync(hook, snippet, { mode: 0o755 });
     console.log(`[closegraph] post-commit hook installed → ${hook}`);
-    console.log(`[closegraph] it re-indexes ${repoPath} and refreshes ${snapshotOut} after every commit`);
+    console.log(`[closegraph] it re-indexes ${repoPath} in the background after every commit, refreshing ${snapshotOut}`);
     process.exit(0);
   }
   // uninstall
@@ -119,6 +136,17 @@ interface LoadedGraph {
   metrics?: CallMetrics & { files: number; dynamicImports: number; durationMs: number };
 }
 
+/**
+ * Atomic file write (review M1): temp file in the SAME directory, then rename —
+ * POSIX rename is atomic, so concurrent hook-triggered runs can never interleave
+ * into a torn snapshot (the reader self-heals, but never even sees a partial file).
+ */
+function writeAtomic(path: string, contents: string): void {
+  const tmp = join(dirname(path), `.${basename(path)}.tmp-${process.pid}`);
+  writeFileSync(tmp, contents);
+  renameSync(tmp, path);
+}
+
 function loadGraph(): LoadedGraph {
   // snapshot reuse: staleness needs a gitHead on BOTH sides (ledger Ruling 13 —
   // undefined on either side means "cannot detect staleness", i.e. not stale)
@@ -145,7 +173,7 @@ function loadGraph(): LoadedGraph {
   const result = indexRepo(repoPath);
   console.log(`[closegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
   if (snapshotPath !== undefined) {
-    writeFileSync(snapshotPath, JSON.stringify(takeSnapshot(result.store, repoPath, currentGitHead()), null, 2));
+    writeAtomic(snapshotPath, JSON.stringify(takeSnapshot(result.store, repoPath, currentGitHead()), null, 2));
     console.log(`[closegraph] snapshot written to ${snapshotPath}`);
   }
   return result;
@@ -176,8 +204,7 @@ if (exportPath !== undefined) {
     edges: snap.edges.map((e) => ({ ...e, provenance: edgeProvenance(e) })),
   };
   writeFileSync(exportPath, JSON.stringify(enriched, null, 2));
-  const tagged = enriched.edges.filter((e) => e.kind === "calls").length;
-  console.log(`[closegraph] graph.json exported to ${exportPath} (${tagged} call edges tagged with provenance)`);
+  console.log(`[closegraph] graph.json exported to ${exportPath} (${enriched.edges.length} edges tagged with provenance)`);
 }
 
 if (metrics !== undefined) {
