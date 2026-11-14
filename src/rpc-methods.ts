@@ -10,7 +10,9 @@ import { resolveRef } from "./tools/resolve-ref.js";
 import { riskBucket, riskExplain, type RiskFacts } from "./view/risk.js";
 import { buildPaletteIndex, type PaletteIndex } from "./view/palette-index.js";
 import type { GraphNode } from "./graph/types.js";
+import type { EgoNeighbor } from "../rpc/index.js";
 import type {
+  EgoGraphPayload,
   FileSummary,
   FilesPayload,
   FileSymbolsPayload,
@@ -112,6 +114,21 @@ function symbolSummary(handle: GraphHandle, node: GraphNode): SymbolSummary {
     callers: handle.store.callers(node.id).length,
     callees: handle.store.callees(node.id).length,
     riskBucket: riskBucket(factsFor(handle, node)),
+  };
+}
+
+/** Max neighbors per side in an egoGraph payload — the view caps, the totals disclose. */
+export const EGO_CAP = 15;
+
+/** One ego-graph node. File neighbors aggregate their symbols' facts (same source as the
+ *  file map — parity with nodeDetail's File branch, final review I1). */
+function egoNeighbor(handle: GraphHandle, node: GraphNode): EgoNeighbor {
+  return {
+    ref: node.qualifiedName,
+    kind: node.kind as "Function" | "Class" | "File",
+    riskBucket: riskBucket(node.kind === "File" ? fileFacts(handle, node) : factsFor(handle, node)),
+    callers: handle.store.callers(node.id).length,
+    callees: handle.store.callees(node.id).length,
   };
 }
 
@@ -217,6 +234,7 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
   fileSymbols: Handler<FileSymbolsPayload>;
   nodeDetail: Handler<NodeDetailPayload>;
   paletteSearch: Handler<PaletteSearchPayload>;
+  egoGraph: Handler<EgoGraphPayload>;
 } {
   const resolveService =
     "resolve" in services ? (root: string | undefined) => services.resolve(root) : () => services as GraphService;
@@ -290,6 +308,37 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
           .search(stringField(input, "prefix"), optionalNumberField(input, "limit") ?? 20)
           .map((m) => ({ ref: m.ref, kind: kindOf(handle, m.ref) })),
       }));
+    },
+
+    async egoGraph(input, _ctx) {
+      return guard(input, (handle) => {
+        const resolution = resolveRef(handle, stringField(input, "ref"));
+        if (resolution.node === undefined) {
+          // the SAME not-found shape nodeDetail builds — one miss contract for the TUI
+          return {
+            ...provenance(handle),
+            error: "not-found" as const,
+            ambiguous: resolution.ambiguous,
+            suggestions: resolution.candidates.map((n) => n.qualifiedName),
+          };
+        }
+        const center = resolution.node;
+        // center excluded from both sides (self-recursion must not list itself);
+        // sides are code-unit sorted BEFORE slicing so the cap keeps a stable head
+        const others = (nodes: GraphNode[]) =>
+          nodes.filter((n) => n.id !== center.id).sort(byQualifiedName);
+        const callerNodes = others(handle.store.callers(center.id));
+        const calleeNodes = others(handle.store.callees(center.id));
+        return {
+          ...provenance(handle),
+          center: egoNeighbor(handle, center),
+          callers: callerNodes.slice(0, EGO_CAP).map((n) => egoNeighbor(handle, n)),
+          callees: calleeNodes.slice(0, EGO_CAP).map((n) => egoNeighbor(handle, n)),
+          totalCallers: callerNodes.length,
+          totalCallees: calleeNodes.length,
+          unresolvedOut: handle.store.edgesFrom(center.id, "calls").filter((e) => e.unresolved === true).length,
+        };
+      });
     },
   };
 }

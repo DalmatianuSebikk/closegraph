@@ -61,10 +61,30 @@ export interface PaletteMatch {
   kind: string;
 }
 
+/** One node of the ego graph: the center or a direct neighbor. `callers`/`callees`
+ *  are the neighbor's own direct resolved counts — context for the re-center choice. */
+export interface EgoNeighbor {
+  ref: string;              // qualifiedName, e.g. "src/service/user.ts#UserService.greet"
+  kind: "Function" | "Class" | "File";
+  riskBucket: RiskBucket;
+  callers: number;
+  callees: number;
+}
+
+export interface EgoGraphData extends Provenance {
+  center: EgoNeighbor;
+  callers: EgoNeighbor[];   // code-unit sorted (byQualifiedName), center EXCLUDED, capped at 15
+  callees: EgoNeighbor[];   // same rules; a mutual-cycle neighbor may appear in BOTH — honest
+  totalCallers: number;     // exact distinct-other totals — caps disclosed, never silent
+  totalCallees: number;
+  unresolvedOut: number;    // center's unresolved+external outgoing calls (summary line)
+}
+
 export type FilesPayload = (Provenance & { files: FileSummary[] }) | UnavailablePayload;
 export type FileSymbolsPayload = (Provenance & { symbols: SymbolSummary[] }) | UnavailablePayload;
 export type NodeDetailPayload = (Provenance & NodeDetail) | NotFoundPayload | UnavailablePayload;
 export type PaletteSearchPayload = (Provenance & { matches: PaletteMatch[] }) | UnavailablePayload;
+export type EgoGraphPayload = EgoGraphData | NotFoundPayload | UnavailablePayload;
 
 const object = { type: "object" } as const;
 
@@ -100,6 +120,15 @@ export const closegraphRpc = {
         type: "object",
         properties: { prefix: { type: "string" }, limit: { type: "number" }, ...rootProperty },
         required: ["prefix"],
+        additionalProperties: false,
+      },
+      output: object,
+    },
+    egoGraph: {
+      input: {
+        type: "object",
+        properties: { ref: { type: "string" }, ...rootProperty },
+        required: ["ref"],
         additionalProperties: false,
       },
       output: object,
