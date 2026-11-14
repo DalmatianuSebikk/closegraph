@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { appendFileSync, existsSync } from "node:fs";
 import { indexRepo, prepareProject } from "../src/indexer/pipeline.js";
+import type { IndexResult } from "../src/indexer/pipeline.js";
 import { extractFile } from "../src/indexer/extract.js";
 import { createQueryTool } from "../src/tools/query.js";
 import { createBlastRadiusTool } from "../src/tools/blast-radius.js";
@@ -32,9 +33,19 @@ export function outputByteStats(bytes: number[]): { avg: number; p95: number; p1
   };
 }
 
+/** One deterministic line per languages key (sorted): resolution + dangerous-sink
+ *  roll-up per language (Task 11). Same metrics object ⇒ same lines, every machine. */
+export function packStatsLines(metrics: IndexResult["metrics"]): string[] {
+  return Object.keys(metrics.languages)
+    .sort()
+    .map((language) => {
+      const m = metrics.languages[language];
+      return `${language}: ${m.files} files, ${m.resolved}/${m.callSites} call sites resolved, ${m.dangerousSinks} dangerous-sink sites`;
+    });
+}
+
 /** 10 representative refs pinned from the excalidraw fixture (pinned commit in
- *  docs/superpowers/spikes/m1-benchmark.md) — the SAME list every run, by design. */
-const BENCHMARK_REFS = {
+ *  docs/superpowers/spikes/m1-benchmark.md) — the SAME list every run, by design. */const BENCHMARK_REFS = {
   hubs: [
     "packages/math/src/point.ts#pointFrom", // 235 callers
     "packages/element/src/Scene.ts#Scene.getNonDeletedElementsMap", // 140 callers
@@ -62,8 +73,7 @@ const toolCtx = {
 } as unknown as Parameters<Info["execute"]>[1];
 
 /** After the resolution run: execute the 4 tools over the pinned refs, print avg/p95/p100
- *  output bytes per tool + total (bytes only — no timing noise). */
-async function runToolByteMetrics(handle: GraphHandle): Promise<void> {
+ *  output bytes per tool + total (bytes only — no timing noise). */async function runToolByteMetrics(handle: GraphHandle): Promise<void> {
   const service: GraphService = {
     // reuse the already-indexed graph — never re-index inside the metric pass
     get: async () => handle,
@@ -165,8 +175,22 @@ async function main(): Promise<void> {
 
   if (resolutionRate < 0.8) printUnresolvedBreakdown();
 
+  // Task 8 landed the shared vendor/ skip in the TS pass too: excalidraw has no
+  // vendor/ dir, so its numbers cannot move — this line records the canary
+  console.log(`vendor-skip canary: excalidraw resolution rate ${resolutionRate.toFixed(4)} — must not move (excalidraw has no vendor/ dir)`);
+
   // Task 9: per-tool token-spend metrics over the already-indexed graph
   await runToolByteMetrics({ store, metrics, source: "built", staleness: "fresh" });
+
+  // Task 11: per-language pack stats over the poly-repo fixture (guard-skip when absent)
+  const polyRoot = join(import.meta.dir, "..", "tests", "fixtures", "poly-repo");
+  if (existsSync(polyRoot)) {
+    const poly = await indexRepo(polyRoot);
+    console.log("\nper-language pack stats (tests/fixtures/poly-repo):");
+    for (const line of packStatsLines(poly.metrics)) console.log(line);
+  } else {
+    console.log("\nper-language pack stats skipped: tests/fixtures/poly-repo absent");
+  }
 }
 
 if (import.meta.main) await main();
