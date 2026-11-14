@@ -8,6 +8,9 @@ import { capList, graphMeta, stalenessNoteLines } from "./render-utils.js";
 const INLINE_LIST_MAX = 24;
 /** Items kept when a long list is capped (pointer line reports the rest). */
 const LIST_SHOWN_MAX = 20;
+/** Batch refs bounds: at least one, at most ten cards per call. */
+const MIN_REFS = 1;
+const MAX_REFS = 10;
 
 /** ts-morph stores signatures arrow-style; render them in the friendlier method form. */
 function renderSignature(node: GraphNode): string {
@@ -43,26 +46,77 @@ function renderNode(handle: GraphHandle, node: GraphNode): string {
   return lines.join("\n");
 }
 
-/** closegraph_query: node facts for one symbol, resolved by qualifiedName, bare name, or file path. */
+/** One ref's card body (no staleness note — that is appended once per result). */
+interface RefCard {
+  readonly body: string;
+  readonly resolved: boolean;
+  readonly meta: Record<string, unknown>;
+}
+
+/** Resolve and render one ref: node facts on hit, the existing miss block otherwise. */
+function renderRefCard(handle: GraphHandle, ref: string): RefCard {
+  const { node, candidates, suggestion, ambiguous } = resolveRef(handle, ref);
+  if (node !== undefined) {
+    const callers = handle.store.callers(node.id);
+    const callees = handle.store.callees(node.id);
+    return {
+      body: renderNode(handle, node),
+      resolved: true,
+      // metadata is not model-visible (verified from @opencode/schema + @opencode/ai):
+      // content renders both lists, so metadata carries counts only
+      meta: { node, callerCount: callers.length, calleeCount: callees.length },
+    };
+  }
+  if (candidates.length > 0) {
+    const heading = ambiguous ? "multiple matches" : "not found — did you mean";
+    return { body: renderMatches(ref, candidates, heading), resolved: false, meta: { suggestion } };
+  }
+  return { body: `not found: ${ref} (no similar symbols in the graph)`, resolved: false, meta: {} };
+}
+
+/** closegraph_query: facts for 1–10 symbols, resolved by qualifiedName, bare name, or file path. */
 export function createQueryTool(service: GraphService): Info {
   return {
     name: "closegraph_query",
     description:
-      "Look up facts about one symbol in the code graph: kind, file, signature, exported flag, direct callers and callees. " +
+      "Look up facts about 1 to 10 code-graph symbols in one call: kind, file, signature, exported flag, direct callers and callees. " +
       "Call it before editing a symbol to see its usage surface. " +
-      "ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name (formatName, Calculator.add), or a file path (src/lib/util.ts); resolved in that order.",
+      "Each ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name (formatName, Calculator.add), or a file path (src/lib/util.ts); resolved in that order. " +
+      "One card per ref in input order, then a resolved-count summary.",
     input: {
       type: "object",
       properties: {
+        refs: {
+          type: "array",
+          minItems: MIN_REFS,
+          maxItems: MAX_REFS,
+          items: { type: "string", minLength: 1 },
+          description: "1 to 10 symbols (qualifiedName, bare symbol name, or file path)",
+        },
         ref: {
           type: "string",
           minLength: 1,
-          description: "qualifiedName (file.ts#Symbol.path), bare symbol name, or file path",
+          description: "legacy single-symbol form — normalized to refs: [ref]",
         },
       },
-      required: ["ref"],
+      anyOf: [{ required: ["refs"] }, { required: ["ref"] }],
     },
-    async execute(input: { ref: string }, ctx) {
+    async execute(input: { ref?: string; refs?: string[] }, ctx) {
+      // legacy single-ref shape stays accepted: ref → refs: [ref]
+      const refs = input.refs ?? (input.ref !== undefined ? [input.ref] : undefined);
+      if (
+        !Array.isArray(refs) ||
+        refs.length < MIN_REFS ||
+        refs.length > MAX_REFS ||
+        !refs.every((ref) => typeof ref === "string" && ref.length > 0)
+      ) {
+        return {
+          content: `invalid input: refs must list between ${MIN_REFS} and ${MAX_REFS} symbols (got ${
+            Array.isArray(refs) ? refs.length : "none"
+          })`,
+        };
+      }
+
       let handle: GraphHandle;
       try {
         handle = await service.get((msg) => void ctx.progress({ message: msg }));
@@ -73,29 +127,26 @@ export function createQueryTool(service: GraphService): Info {
         throw error;
       }
 
-      const { node, candidates, suggestion, ambiguous } = resolveRef(handle, input.ref);
       const graph = graphMeta(handle);
       const note = stalenessNoteLines(handle);
-      if (node !== undefined) {
-        const callers = handle.store.callers(node.id);
-        const callees = handle.store.callees(node.id);
+      if (refs.length === 1) {
+        // single ref: exactly the pre-batch output — no headers, no summary
+        const card = renderRefCard(handle, refs[0]);
         return {
-          content: [renderNode(handle, node), ...note].join("\n"),
-          // metadata is not model-visible (verified from @opencode/schema + @opencode/ai):
-          // content renders both lists, so metadata carries counts only
-          metadata: { node, callerCount: callers.length, calleeCount: callees.length, graph },
+          content: [card.body, ...note].join("\n"),
+          metadata: { ...card.meta, graph },
         };
       }
-      if (candidates.length > 0) {
-        const heading = ambiguous ? "multiple matches" : "not found — did you mean";
-        return {
-          content: [renderMatches(input.ref, candidates, heading), ...note].join("\n"),
-          metadata: { suggestion, graph },
-        };
-      }
+
+      const cards = refs.map((ref, i) => ({ header: `[${i + 1}/${refs.length}] ${ref}`, ...renderRefCard(handle, ref) }));
+      const resolvedCount = cards.filter((card) => card.resolved).length;
       return {
-        content: [`not found: ${input.ref} (no similar symbols in the graph)`, ...note].join("\n"),
-        metadata: { graph },
+        content: [
+          ...cards.map((card) => [card.header, card.body].join("\n")),
+          `${resolvedCount}/${refs.length} resolved`,
+          ...note,
+        ].join("\n\n"),
+        metadata: { resolvedCount, refCount: refs.length, graph },
       };
     },
   };
