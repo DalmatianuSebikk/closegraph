@@ -253,11 +253,14 @@ console.log(
 );
 
 /** Export-only provenance tag (Ruling 5: computed from existing edge fields, no core schema change):
+ *  - edges flagged inferred (every pack-resolved edge) → "inferred" — syntax-level
+ *    resolution, checked FIRST so it wins even on external: targets
  *  - calls to `external:*` targets → "external" (callee could not be pinned to a project node)
  *  - calls flagged unresolved with a project id → "unresolved" (defensive: today's indexer
  *    always pairs unresolved with external: targets, but the export computes from fields)
  *  - everything else → "resolved" (contains/imports are syntax facts; calls that resolved). */
-function edgeProvenance(edge: GraphEdge): "resolved" | "unresolved" | "external" {
+function edgeProvenance(edge: GraphEdge): "resolved" | "unresolved" | "external" | "inferred" {
+  if (edge.inferred === true) return "inferred";
   if (edge.kind === "calls" && edge.to.startsWith("external:")) return "external";
   if (edge.kind === "calls" && edge.unresolved === true) return "unresolved";
   return "resolved";

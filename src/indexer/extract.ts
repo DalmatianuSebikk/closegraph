@@ -134,12 +134,13 @@ export function extractFileSymbols(sourceFile: SourceFile, relPath: string, reEx
     filePath: relPath,
     span: spanOf(sourceFile, sourceFile.getStart(), sourceFile.getEnd()),
     exported: true,
+    language: "typescript",
   });
 
   const reExported = reExportedNames ?? collectReExportMap(sourceFile.getProject()).get(sourceFile) ?? new Set<string>();
 
   const addSymbol = (node: GraphNode): void => {
-    nodes.push(node);
+    nodes.push({ ...node, language: node.language ?? "typescript" });
     edges.push({ kind: "contains", from: fileId, to: node.id });
   };
 

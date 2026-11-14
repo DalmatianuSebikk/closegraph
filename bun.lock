@@ -6,6 +6,7 @@
       "name": "codegraph",
       "dependencies": {
         "ts-morph": "^28.0.0",
+        "web-tree-sitter": "0.25.10",
       },
       "devDependencies": {
         "@opencode/plugin": "^2.2.7",

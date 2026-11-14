@@ -2,7 +2,7 @@ import type { GraphNode, GraphEdge } from "./types.js";
 import type { GraphStore } from "./store.js";
 import { createMemoryStore } from "./memory.js";
 
-export const SNAPSHOT_VERSION = 1;
+export const SNAPSHOT_VERSION = 2;
 
 export interface SnapshotData {
   version: number;

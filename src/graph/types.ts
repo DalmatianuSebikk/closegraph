@@ -14,6 +14,12 @@ export interface GraphNode {
   span: SourceSpan;
   signature?: string;    // functions only, ≤120 chars
   exported: boolean;
+  language?: string;     // "typescript" | "javascript" | pack ids ("python" | "php" | "bash");
+                         // ts-morph + packs always set it; OPTIONAL so hand-built/legacy nodes
+                         // stay valid (views default a missing language to "ts")
+  dangerousCalls?: { name: string; count: number }[]; // sorted by name; Function nodes, plus bash
+                                                       // File nodes for file-level bodies; written by
+                                                       // the pack pipeline, surfaced in reports/details
 }
 
 export type EdgeKind = "contains" | "imports" | "calls";
@@ -24,6 +30,8 @@ export interface GraphEdge {
   to: string;            // node id, or `external:${targetName}` when unresolved
   unresolved?: boolean;  // calls only
   targetName?: string;   // best-effort callee name when unresolved
+  inferred?: boolean;    // true on EVERY pack-resolved edge (calls + imports);
+                         // never set on ts-morph edges
 }
 
 export function makeQualifiedName(relPath: string, symbolPath: string): string {
