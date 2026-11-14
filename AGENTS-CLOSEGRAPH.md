@@ -34,3 +34,20 @@ output carries a freshness note (`graph freshness unknown (no git HEAD)`), numbe
 may lag recent edits — re-verify critical facts by reading the named file. Long
 lists are capped on purpose (`… +N more`): narrow the query, or raise `limit`
 (max 200) on `closegraph_blast_radius` / `closegraph_subgraph`.
+
+## CLI: export a committable graph.json + post-commit freshness
+
+The repo-root CLI works without OpenCode:
+
+```sh
+bun run src/cli.ts <repo> --export graph.json   # snapshot JSON, every edge tagged
+                                               # provenance: resolved|unresolved|external
+bun run src/cli.ts <repo> hook install          # post-commit hook re-indexes and refreshes
+bun run src/cli.ts <repo> hook uninstall        # removes only closegraph's own hook
+```
+
+`graph.json` is the same format the plugin restores, so it round-trips: commit it
+and any tool run can reuse it as a snapshot. `hook install` refuses to overwrite
+an existing post-commit hook; the hook refreshes the gitignored
+`closegraph.snapshot.json` so staleness is detectable right after every commit.
+

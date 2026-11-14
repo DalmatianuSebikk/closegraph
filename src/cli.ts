@@ -1,13 +1,15 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { indexRepo } from "./indexer/pipeline.js";
 import { isStale, restoreSnapshot, takeSnapshot } from "./graph/snapshot.js";
 import type { GraphStore } from "./graph/store.js";
 import type { SnapshotData } from "./graph/snapshot.js";
 import type { CallMetrics } from "./indexer/extract.js";
+import type { GraphEdge } from "./graph/types.js";
 
-const USAGE = "usage: bun run src/cli.ts <repoPath> [--snapshot out.json] [--callers <qualifiedName>]";
+const USAGE =
+  "usage: bun run src/cli.ts <repoPath> [--snapshot out.json] [--export graph.json] [--callers <qualifiedName>] [hook install|uninstall]";
 
 function argValue(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
@@ -20,27 +22,86 @@ function argValue(flag: string): string | undefined {
 const positional = process.argv.slice(2).filter((a) => !a.startsWith("--") && !isFlagValue(a));
 function isFlagValue(arg: string): boolean {
   const prev = process.argv[process.argv.indexOf(arg) - 1];
-  return prev === "--snapshot" || prev === "--callers";
+  return prev === "--snapshot" || prev === "--callers" || prev === "--export";
 }
 
 const repoPath = resolve(positional[0] ?? "");
 const snapshotPath = argValue("--snapshot");
+const exportPath = argValue("--export");
 const callersName = argValue("--callers");
 
-// --snapshot with a missing or flag-like value would silently skip writing
-// the snapshot (argValue yields undefined) — that deserves a usage error
+// --snapshot/--export with a missing or flag-like value would silently skip writing
+// (argValue yields undefined) — that deserves a usage error
 if (process.argv.includes("--snapshot") && snapshotPath === undefined) {
   console.error(`[codegraph] --snapshot requires a file path value\n${USAGE}`);
   process.exit(1);
 }
+if (process.argv.includes("--export") && exportPath === undefined) {
+  console.error(`[codegraph] --export requires a file path value\n${USAGE}`);
+  process.exit(1);
+}
 
-if (positional.length === 0 || positional.length > 1) {
+// the only multi-positional form is `hook install|uninstall`
+const hookMode = positional[1] === "hook";
+if (positional.length > 1 && !(hookMode && positional.length === 3)) {
+  console.error(USAGE);
+  process.exit(1);
+}
+if (hookMode && positional[2] !== "install" && positional[2] !== "uninstall") {
+  console.error(`[closegraph] hook expects install or uninstall (got ${positional[2] ?? "nothing"})\n${USAGE}`);
+  process.exit(1);
+}
+
+if (positional.length === 0) {
   console.error(USAGE);
   process.exit(1);
 }
 if (!existsSync(repoPath)) {
   console.error(`[closegraph] no such directory: ${repoPath}`);
   process.exit(1);
+}
+
+/** Marker line proving a post-commit hook is ours — uninstall refuses foreign hooks. */
+const HOOK_MARKER = "# closegraph post-commit hook";
+
+if (hookMode) {
+  if (!existsSync(join(repoPath, ".git"))) {
+    console.error(`[closegraph] not a git repo: ${repoPath} — the post-commit hook needs one`);
+    process.exit(1);
+  }
+  mkdirSync(join(repoPath, ".git", "hooks"), { recursive: true });
+  const hook = join(repoPath, ".git", "hooks", "post-commit");
+  if (positional[2] === "install") {
+    if (existsSync(hook)) {
+      console.error(`[closegraph] refusing to overwrite existing post-commit hook: ${hook}`);
+      process.exit(1);
+    }
+    const cliAbs = resolve(import.meta.path);
+    // the refresh lands on a *.snapshot.json path — gitignored by the closegraph convention
+    const snapshotOut = join(repoPath, "closegraph.snapshot.json");
+    const snippet = [
+      "#!/bin/sh",
+      `${HOOK_MARKER} — refresh the code-graph snapshot after every commit`,
+      `bun run ${cliAbs} ${repoPath} --snapshot ${snapshotOut} >/dev/null 2>&1 || true`,
+      "",
+    ].join("\n");
+    writeFileSync(hook, snippet, { mode: 0o755 });
+    console.log(`[closegraph] post-commit hook installed → ${hook}`);
+    console.log(`[closegraph] it re-indexes ${repoPath} and refreshes ${snapshotOut} after every commit`);
+    process.exit(0);
+  }
+  // uninstall
+  if (!existsSync(hook)) {
+    console.log(`[closegraph] no closegraph hook installed at ${hook}`);
+    process.exit(0);
+  }
+  if (!readFileSync(hook, "utf8").includes(HOOK_MARKER)) {
+    console.error(`[closegraph] refusing to remove a non-closegraph hook: ${hook}`);
+    process.exit(1);
+  }
+  rmSync(hook);
+  console.log("[closegraph] post-commit hook removed");
+  process.exit(0);
 }
 
 function currentGitHead(): string | undefined {
@@ -96,6 +157,28 @@ const stats = store.stats();
 console.log(
   `files: ${stats.files}  functions: ${stats.functions}  classes: ${stats.classes}  edges: ${stats.edges}  unresolvedCalls: ${stats.unresolvedCalls}`,
 );
+
+/** Export-only provenance tag (Ruling 5: computed from existing edge fields, no core schema change):
+ *  - calls to `external:*` targets → "external" (callee could not be pinned to a project node)
+ *  - calls flagged unresolved with a project id → "unresolved" (defensive: today's indexer
+ *    always pairs unresolved with external: targets, but the export computes from fields)
+ *  - everything else → "resolved" (contains/imports are syntax facts; calls that resolved). */
+function edgeProvenance(edge: GraphEdge): "resolved" | "unresolved" | "external" {
+  if (edge.kind === "calls" && edge.to.startsWith("external:")) return "external";
+  if (edge.kind === "calls" && edge.unresolved === true) return "unresolved";
+  return "resolved";
+}
+
+if (exportPath !== undefined) {
+  const snap = takeSnapshot(store, repoPath, currentGitHead());
+  const enriched: SnapshotData = {
+    ...snap,
+    edges: snap.edges.map((e) => ({ ...e, provenance: edgeProvenance(e) })),
+  };
+  writeFileSync(exportPath, JSON.stringify(enriched, null, 2));
+  const tagged = enriched.edges.filter((e) => e.kind === "calls").length;
+  console.log(`[closegraph] graph.json exported to ${exportPath} (${tagged} call edges tagged with provenance)`);
+}
 
 if (metrics !== undefined) {
   const denominator = metrics.resolved + metrics.unresolved;
