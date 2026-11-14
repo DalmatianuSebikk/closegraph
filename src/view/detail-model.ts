@@ -106,6 +106,16 @@ export function createDetailModel(deps: {
           { text: `risk: ${payload.risk.bucket} — ${payload.risk.because.join(", ")}` },
           ...listLines("callers", payload.callers),
           ...listLines("callees", payload.callees),
+          ...(payload.dangerousCalls !== undefined && payload.dangerousCalls.length > 0
+            ? [
+                {
+                  // counts render as ×N, singles bare (Task 9); signal, never muted
+                  text: `dangerous calls: ${payload.dangerousCalls
+                    .map((call) => (call.count > 1 ? `${call.name} ×${call.count}` : call.name))
+                    .join(", ")}`,
+                },
+              ]
+            : []),
           ...(payload.unresolvedCount > 0
             ? [
                 {

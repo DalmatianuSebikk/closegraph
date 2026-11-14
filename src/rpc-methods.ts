@@ -255,6 +255,9 @@ export function createRpcHandlers(service: GraphService): {
           callers: handle.store.callers(node.id).map((n) => n.qualifiedName).sort(),
           callees: handle.store.callees(node.id).map((n) => n.qualifiedName).sort(),
           unresolvedCount: handle.store.edgesFrom(node.id, "calls").filter((e) => e.unresolved === true).length,
+          ...(node.dangerousCalls !== undefined && node.dangerousCalls.length > 0
+            ? { dangerousCalls: node.dangerousCalls }
+            : {}),
           risk: { bucket: riskBucket(facts), because: riskExplain(facts) },
         };
       });

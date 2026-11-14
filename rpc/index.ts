@@ -37,6 +37,9 @@ export interface NodeDetail {
   callers: string[];         // qualifiedNames, sorted
   callees: string[];         // qualifiedNames, sorted
   unresolvedCount: number;
+  /** dangerous calls found in this symbol (pack sink tables, Task 9); sorted by
+   *  name; Function nodes plus bash File nodes for file-level bodies. */
+  dangerousCalls?: { name: string; count: number }[];
   risk: { bucket: RiskBucket; because: string[] };
 }
 

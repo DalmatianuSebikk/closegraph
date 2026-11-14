@@ -23,6 +23,7 @@ interface Hub {
 interface ReportData {
   readonly counts: { files: number; functions: number; classes: number; callEdges: number };
   readonly resolution: { resolved: number; total: number; basis: "sites" | "edges" };
+  readonly dangerousSinks: { sites: number; byLanguage: Record<string, number> };
   readonly hubs: Hub[];
   readonly hiddenHubs: number;
   readonly entryPoints: { count: number; sample: string[]; hidden: number };
@@ -77,9 +78,23 @@ function computeReport(handle: GraphHandle): ReportData {
     .map((n) => n.qualifiedName);
   const { shown: sample, hidden } = capList(entries, TOP_ENTRIES);
 
+  // dangerous sinks (Task 9): Σ count over all nodes; byLanguage reads
+  // node.language ?? "typescript" — snapshot-sourced handles compute the same
+  // numbers because dangerousCalls rides the v2 snapshot
+  const byLanguage: Record<string, number> = {};
+  let sinkSites = 0;
+  for (const node of nodes) {
+    for (const call of node.dangerousCalls ?? []) {
+      sinkSites += call.count;
+      const language = node.language ?? "typescript";
+      byLanguage[language] = (byLanguage[language] ?? 0) + call.count;
+    }
+  }
+
   return {
     counts: { files, functions, classes, callEdges },
     resolution: { resolved: metrics.resolved, total: metrics.callSites, basis },
+    dangerousSinks: { sites: sinkSites, byLanguage },
     hubs: shownHubs,
     hiddenHubs: hubs.length - shownHubs.length,
     entryPoints: { count: entries.length, sample, hidden },
@@ -111,6 +126,8 @@ function renderReport(handle: GraphHandle, data: ReportData): string {
       `resolution: ${resolved}/${total} edges resolved (${Math.round((100 * resolved) / total)}%, edge-based — snapshot carries no per-site metrics)`,
     );
   }
+  // ALWAYS printed — zero sinks read as 0; the line sits directly after resolution (Task 9)
+  lines.push(`dangerous sinks: ${data.dangerousSinks.sites} call sites present`);
   lines.push("top fan-in hubs (max 10):");
   if (data.hubs.length === 0) {
     lines.push("  (no symbol has a caller)");
@@ -153,6 +170,7 @@ export function createReportTool(service: GraphService): Info {
         metadata: {
           counts: data.counts,
           resolution: data.resolution,
+          dangerousSinks: data.dangerousSinks,
           hubs: data.hubs,
           hiddenHubs: data.hiddenHubs,
           entryPoints: data.entryPoints,
