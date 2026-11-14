@@ -18,6 +18,7 @@ export interface Provenance {
 
 export interface FileSummary {
   ref: string;               // repo-relative file path
+  language: string;          // "typescript" | "javascript" | pack ids — the file-map column (Task 10)
   symbols: number;
   unresolvedCalls: number;
   riskBucket: RiskBucket;

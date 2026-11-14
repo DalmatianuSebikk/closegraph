@@ -90,6 +90,7 @@ function fileSummary(handle: GraphHandle, file: GraphNode): FileSummary {
   }
   return {
     ref: file.qualifiedName,
+    language: file.language ?? "typescript",
     symbols: symbols.length,
     unresolvedCalls,
     riskBucket: riskBucket(fileFacts(handle, file)),

@@ -144,12 +144,13 @@ export function actionFor<K extends Record<string, readonly string[]>>(keymap: K
  *  SPREAD the model KEYMAP exports (single source for model actions) and add route-only
  *  actions (palette opener, detail refresh). The file map has no model keymap export
  *  (frozen file), so its record lives here. */
-const MAP_KEYMAP = {
+export const MAP_KEYMAP = {
   up: ["up", "k"],
   down: ["down", "j"],
   open: ["enter", "return"],
   refresh: ["r"],
   palette: ["p"],
+  cycleLanguage: ["l"],
 } as const
 
 const SYMBOLS_KEYMAP = { ...SYMBOL_VIEW_KEYMAP, palette: ["p"] } as const
@@ -357,6 +358,11 @@ function CodeGraphRoute() {
           key.preventDefault()
           openPalette()
           break
+        case "cycleLanguage":
+          key.preventDefault()
+          fileMap.cycleLanguageFilter()
+          syncMap()
+          break
         default:
           break
       }
@@ -486,7 +492,7 @@ function CodeGraphRoute() {
         ))}
       </box>
       <text width="100%" height={1} flexShrink={0} fg="gray">
-        {"↑/↓ or j/k move · enter open · r refresh · p jump to symbol"}
+        {"↑/↓ or j/k move · enter open · r refresh · l language · p jump to symbol"}
       </text>
     </box>
   )
