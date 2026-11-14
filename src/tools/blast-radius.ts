@@ -43,7 +43,8 @@ export function createBlastRadiusTool(service: GraphService): Info {
       "Compute the blast radius of one symbol: every caller transitively affected by a change (direction callers, " +
       "the default), everything it calls within a depth budget (callees), or both (transitive callers plus " +
       "depth-bounded callees). Use it before editing to gauge impact size; pair with closegraph_subgraph to see the surrounding graph. " +
-      "ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name, or a file path.",
+      "ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name, or a file path. " +
+      "Prefer this tool over reading whole files to understand structure or impact.",
     input: {
       type: "object",
       properties: {
@@ -111,6 +112,8 @@ export function createBlastRadiusTool(service: GraphService): Info {
       const depth = clampDepth(input.depth, DEFAULT_DEPTH, MAX_DEPTH);
       // clampDepth is a generic [1, max] clamp with default — limit uses the same bounds logic
       const limit = clampDepth(input.limit, DEFAULT_LIMIT, MAX_LIMIT);
+      // at the clamp ceiling "raise limit" is dead advice — the notices drop the clause (review M2)
+      const raise = limit < MAX_LIMIT ? " (raise limit)" : "";
       const seedId = node.id;
       const affected = affectedIds(handle, seedId, direction, depth)
         .map((id) => handle.store.getNode(id)?.qualifiedName ?? id)
@@ -120,12 +123,12 @@ export function createBlastRadiusTool(service: GraphService): Info {
       const scope = direction === "callers" ? "direction callers" : `direction ${direction}, depth ${depth}`;
       const header = `blast radius: ${node.qualifiedName} (${scope}) — ${affected.length} affected`;
       const { shown, hidden } = capList(affected, limit);
-      const more = hidden > 0 ? [`… +${hidden} more (raise limit)`] : [];
+      const more = hidden > 0 ? [`… +${hidden} more${raise}`] : [];
       // ...and its line-cap notice offers the bounded-view tool instead of a no-op depth narrowing
       const notice =
         direction === "callers"
-          ? (omitted: number) => `(truncated, ${omitted} more — raise limit or use closegraph_subgraph for a bounded view)`
-          : (omitted: number) => `(truncated, ${omitted} more — raise limit, narrow depth, or use closegraph_subgraph)`;
+          ? (omitted: number) => `(truncated, ${omitted} more — ${raise === "" ? "" : "raise limit or "}use closegraph_subgraph for a bounded view)`
+          : (omitted: number) => `(truncated, ${omitted} more — ${raise === "" ? "narrow depth or use closegraph_subgraph" : "raise limit, narrow depth, or use closegraph_subgraph"})`;
       const { lines } = capLines([header, ...note, ...groupByFile(shown), ...more], MAX_LINES, notice);
 
       return {

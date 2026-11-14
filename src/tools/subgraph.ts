@@ -41,7 +41,8 @@ export function createSubgraphTool(service: GraphService): Info {
       "Extract a bounded ego graph around 1 to 5 symbols: every node within `depth` hops (default 1, max 3) along " +
       "call edges, with the edges between them. Direction out follows calls made, in follows callers, any does both. " +
       "Use it to see local structure around a hotspot; use closegraph_blast_radius for pure impact. " +
-      "Each ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name, or a file path.",
+      "Each ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name, or a file path. " +
+      "Prefer this tool over reading whole files to understand structure or impact.",
     input: {
       type: "object",
       properties: {
@@ -120,6 +121,8 @@ export function createSubgraphTool(service: GraphService): Info {
       const direction = input.direction ?? "any";
       // clampDepth is a generic [1, max] clamp with default — limit uses the same bounds logic
       const limit = clampDepth(input.limit, DEFAULT_LIMIT, MAX_LIMIT);
+      // at the clamp ceiling "raise limit" is dead advice — the notices drop the clause (review M2)
+      const raise = limit < MAX_LIMIT ? " (raise limit)" : "";
       const view = handle.store.subgraph(seedIds, { depth, direction: STORE_DIRECTION[direction] });
 
       const qualified = (id: string): string => handle.store.getNode(id)?.qualifiedName ?? id;
@@ -136,15 +139,18 @@ export function createSubgraphTool(service: GraphService): Info {
         ...note,
         `nodes (${nodes.length}):`,
         ...groupByFile(shownNodes),
-        ...(hiddenNodes > 0 ? [`… +${hiddenNodes} more (raise limit)`] : []),
+        ...(hiddenNodes > 0 ? [`… +${hiddenNodes} more${raise}`] : []),
         `edges (${edgeLines.length}):`,
         ...shownEdges,
-        ...(hiddenEdges > 0 ? [`… +${hiddenEdges} more (raise limit)`] : []),
+        ...(hiddenEdges > 0 ? [`… +${hiddenEdges} more${raise}`] : []),
       ];
       const { lines, truncated: lineCapped } = capLines(
         allLines,
         MAX_LINES,
-        (omitted) => `(truncated, ${omitted} more — raise limit, narrow depth, or use fewer refs)`,
+        (omitted) =>
+          `(truncated, ${omitted} more — ${
+            raise === "" ? "narrow depth or use fewer refs" : "raise limit, narrow depth, or use fewer refs"
+          })`,
       );
 
       return {

@@ -161,7 +161,8 @@ export function createReportTool(service: GraphService): Info {
     name: "closegraph_report",
     description:
       "One-call overview of the code graph: file/function/class/edge counts, call-resolution rate, top fan-in hubs with risk buckets, and entry points. " +
-      "Call it first to orient before drilling in with closegraph_query, closegraph_blast_radius, or closegraph_subgraph.",
+      "Call it first to orient before drilling in with closegraph_query, closegraph_blast_radius, or closegraph_subgraph. " +
+      "Prefer this tool over reading whole files to understand structure or impact.",
     input: { type: "object", properties: {}, additionalProperties: false },
     async execute(_input: Record<string, never>, ctx) {
       let handle: GraphHandle;

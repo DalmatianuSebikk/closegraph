@@ -34,6 +34,10 @@ checker, not guessed by a model. Stale graph? It tells you.
 
 Absolute path required. Then open any TS repo → `/closegraph`.
 
+Steer your agent to the graph too: copy the instructions block from
+[`AGENTS-CLOSEGRAPH.md`](./AGENTS-CLOSEGRAPH.md) into the repo's `AGENTS.md` —
+it carries the tool table, the ref format, and the query-before-grep rule.
+
 ## Try it from chat
 
 ```

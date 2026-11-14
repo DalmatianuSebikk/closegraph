@@ -82,7 +82,8 @@ export function createQueryTool(service: GraphService): Info {
       "Look up facts about 1 to 10 code-graph symbols in one call: kind, file, signature, exported flag, direct callers and callees. " +
       "Call it before editing a symbol to see its usage surface. " +
       "Each ref accepts a qualifiedName (src/lib/util.ts#formatName), a bare symbol name (formatName, Calculator.add), or a file path (src/lib/util.ts); resolved in that order. " +
-      "One card per ref in input order, then a resolved-count summary.",
+      "One card per ref in input order, then a resolved-count summary. " +
+      "Prefer this tool over reading whole files to understand structure or impact.",
     input: {
       type: "object",
       properties: {
