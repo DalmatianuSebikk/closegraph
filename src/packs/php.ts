@@ -137,7 +137,12 @@ class Extractor {
   }
 
   private isCallNode(node: Node): boolean {
-    return node.type === "function_call_expression" || node.type === "scoped_call_expression" || node.type === "member_call_expression";
+    return (
+      node.type === "function_call_expression" ||
+      node.type === "scoped_call_expression" ||
+      node.type === "member_call_expression" ||
+      node.type === "nullsafe_member_call_expression"
+    );
   }
 
   private addTopLevelFunction(stmt: Node): void {
@@ -275,6 +280,20 @@ class Extractor {
       return;
     }
 
+    // member calls ($obj->m(), $obj?->m(), get_svc()->m()): this grammar exposes
+    // object/name fields — there is NO `function` field — and receivers are
+    // untyped, so every member form leaves as an externalRef (never dropped)
+    if (call.type === "member_call_expression" || call.type === "nullsafe_member_call_expression") {
+      const name = call.childForFieldName("name");
+      this.metrics.unresolved++;
+      this.externalRefs.push({
+        fromSymbolPath: from,
+        functionName: name !== null ? this.text(name) : "",
+        expressionText,
+      });
+      return;
+    }
+
     const callee = call.childForFieldName("function");
     if (callee === null) return;
 
@@ -298,17 +317,13 @@ class Extractor {
       return;
     }
 
-    // variable ($cb($x)) and member ($obj->m()) callees: dynamic, never dropped
+    // variable ($cb($x)) callees and any other untyped callee shape: dynamic, never dropped
     this.metrics.unresolved++;
     this.externalRefs.push({
       fromSymbolPath: from,
-      functionName: callee.type === "variable_name" ? this.text(callee) : this.memberName(callee),
+      functionName: this.text(callee),
       expressionText,
     });
-  }
-
-  private memberName(callee: Node): string {
-    return callee.childForFieldName("name")?.text ?? "";
   }
 
   private checkSinks(name: string, call: Node, from: string): void {

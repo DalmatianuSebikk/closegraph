@@ -261,7 +261,13 @@ class Extractor {
   }
 
   private signatureOf(node: Node, flavor: "function" | "lambda"): string {
-    if (flavor === "lambda") return truncateSignature(this.slice(node));
+    if (flavor === "lambda") {
+      // `f = lambda x, y=1: …` — the node is the ASSIGNMENT; the signature is the
+      // lambda's own parameter list (probe: the field is `parameters`)
+      const lambda = this.named(node.namedChildren).find((c) => c.type === "lambda");
+      const params = lambda?.childForFieldName("parameters");
+      return truncateSignature(`(${params === null || params === undefined ? "" : this.slice(params)})`);
+    }
     const params = node.childForFieldName("parameters");
     let paramsText = params === null ? "()" : this.slice(params);
     paramsText = paramsText
@@ -304,21 +310,52 @@ class Extractor {
       } else if (stmt.type === "import_from_statement") {
         const children = this.named(stmt.namedChildren);
         const relative = children.find((c) => c.type === "relative_import");
-        const module = children.find((c) => c.type === "dotted_name");
-        const dotted = this.dottedSegments(module ?? null);
-        if (relative !== null && relative !== undefined) {
-          // `from .m import x` / `from ..p import x` — relative to THIS file's dir
-          const dots = this.slice(relative).replace(/[^.]/g, "").length;
+        let moduleNode: Node | undefined; // the MODULE dotted_name — never an imported name
+        let dotlessRelativeBase: string | undefined; // set only for `from . import x`
+
+        if (relative !== undefined) {
+          // `from .m import x` / `from ..p import x` — the module lives INSIDE
+          // relative_import (> dotted_name); stmt-level dotted_names are the
+          // imported NAMES (review I2). import_prefix is exactly the dots.
+          const inner = this.named(relative.namedChildren);
+          const prefix = inner.find((c) => c.type === "import_prefix");
+          moduleNode = inner.find((c) => c.type === "dotted_name");
+          const dots = prefix === undefined ? 1 : this.slice(prefix).length;
           const fileDir = this.relPath.split("/").slice(0, -1);
-          const baseDir = fileDir.slice(0, -(dots - 1));
-          if (dotted !== undefined) addCandidates(dotted, baseDir.join("/"));
-        } else if (dotted !== undefined) {
-          addCandidates(dotted);
+          // one dot = the file's own package dir; each extra dot climbs one more level
+          const base = (dots === 1 ? fileDir : fileDir.slice(0, -(dots - 1)));
+          if (moduleNode !== undefined) {
+            let segments = this.dottedSegments(moduleNode) ?? [];
+            // `from ..pkg.mod import b` from pkg/sub/: the first segment typically
+            // NAMES the climbed-to package — collapse it when it matches; otherwise
+            // keep the blind join (real-python resolution)
+            if (dots >= 2 && segments.length > 0 && base.length > 0 && segments[0] === base[base.length - 1]) {
+              segments = segments.slice(1);
+            }
+            addCandidates(segments, base.join("/"));
+          } else {
+            // `from . import c`: the package's own init (the name's sibling module
+            // is added in the binding loop below)
+            dotlessRelativeBase = base.join("/");
+            this.importTargets.add(`${dotlessRelativeBase}/__init__.py`);
+          }
+        } else {
+          moduleNode = children.find((c) => c.type === "dotted_name");
+          const dotted = this.dottedSegments(moduleNode ?? null);
+          if (dotted !== undefined) {
+            addCandidates(dotted);
+            this.importBound.add(dotted[0]);
+          }
         }
-        if (dotted !== undefined) this.importBound.add(dotted[0]);
+
+        // the imported NAMES bind regardless of module form
         for (const child of children) {
-          if (child !== module && child.type === "dotted_name") {
-            this.importBound.add(this.slice(child)); // `from x import name` binds name
+          if (child === moduleNode || child.type === "relative_import") continue;
+          if (child.type === "dotted_name") {
+            this.importBound.add(this.slice(child));
+            if (dotlessRelativeBase !== undefined && moduleNode === undefined) {
+              this.importTargets.add(`${dotlessRelativeBase}/${this.slice(child)}.py`);
+            }
           } else if (child.type === "aliased_import") {
             const alias = this.named(child.namedChildren).find((c) => c.type === "identifier");
             if (alias !== undefined) {

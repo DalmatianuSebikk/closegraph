@@ -1,7 +1,10 @@
 /**
- * Pack registry — process-global, registration order preserved. `registerPacks()`
- * (src/packs/index.ts) is the only production registrar; tests register stubs
- * directly and MUST clear them afterwards (bun runs all test files in one process).
+ * Pack registry — registration order preserved, idempotent by id.
+ * `registerPacks()` (src/packs/index.ts) is the only production registrar; tests
+ * register stubs directly and MUST clear them (clearRegisteredPacks): bun
+ * isolates test FILES' module registries from each other in-repo, but state
+ * persists ACROSS TESTS WITHIN one file — order/idempotency pins hold by
+ * construction only when each test starts from a known registry state.
  */
 import type { LanguagePack } from "./types.js";
 import { fileExtension, firstLineOf } from "./discover.js";

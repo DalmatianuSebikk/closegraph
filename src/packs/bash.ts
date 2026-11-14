@@ -34,6 +34,7 @@ import type { GraphEdge, GraphNode } from "../graph/types.js";
 import { makeNodeId, makeQualifiedName } from "../graph/types.js";
 import type { ExternalCallRef, LanguagePack, PackExtraction, SinkSite, SinkSpec } from "./types.js";
 import { spanFromNode } from "./emit.js";
+import { SHEBANG_RE } from "./discover.js";
 
 export const bashSinks: readonly SinkSpec[] = [
   { callee: "eval", why: "executes dynamically-constructed shell code" },
@@ -66,7 +67,7 @@ export const bashPack: LanguagePack = {
   displayName: "bash",
   grammarName: "bash",
   extensions: [".sh", ".bash"],
-  shebang: /^#!\s*\/(?:[^\s/]+\/)*(?:env\s+(?:-S\s+)?)?(?:ba)?sh(?:[\s;#]|$)/,
+  shebang: SHEBANG_RE, // the one source of truth for extensionless ownership (discover.ts)
   resolution: { moduleAliases: false, classIndex: false, includeClosure: true },
   sinks: bashSinks,
   extract,
