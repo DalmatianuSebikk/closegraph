@@ -1,16 +1,19 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { renderMatches, resolveRef } from "./resolve-ref.js";
-import { capLines, clampDepth, graphMeta, stalenessNoteLines } from "./render-utils.js";
+import { capLines, capList, clampDepth, graphMeta, groupByFile, stalenessNoteLines } from "./render-utils.js";
 
 const DEFAULT_DEPTH = 3;
 const MAX_DEPTH = 5;
 const MAX_LINES = 200;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
 
 export interface BlastRadiusInput {
   ref: string;
   direction?: "callers" | "callees" | "both";
   depth?: number;
+  limit?: number;
 }
 
 /**
@@ -65,6 +68,14 @@ export function createBlastRadiusTool(service: GraphService): Info {
           multipleOf: 1,
           description: `BFS depth for the callees side (default ${DEFAULT_DEPTH}, max ${MAX_DEPTH}); callers are always fully transitive`,
         },
+        limit: {
+          type: "number",
+          default: DEFAULT_LIMIT,
+          minimum: 1,
+          maximum: MAX_LIMIT,
+          multipleOf: 1,
+          description: `Max affected symbols listed, file-grouped (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}); the header count is always exact`,
+        },
       },
       required: ["ref"],
     },
@@ -98,6 +109,8 @@ export function createBlastRadiusTool(service: GraphService): Info {
 
       const direction = input.direction ?? "callers";
       const depth = clampDepth(input.depth, DEFAULT_DEPTH, MAX_DEPTH);
+      // clampDepth is a generic [1, max] clamp with default — limit uses the same bounds logic
+      const limit = clampDepth(input.limit, DEFAULT_LIMIT, MAX_LIMIT);
       const seedId = node.id;
       const affected = affectedIds(handle, seedId, direction, depth)
         .map((id) => handle.store.getNode(id)?.qualifiedName ?? id)
@@ -106,16 +119,19 @@ export function createBlastRadiusTool(service: GraphService): Info {
       // depth cannot shrink the transitive-caller side, so the callers-mode header omits it
       const scope = direction === "callers" ? "direction callers" : `direction ${direction}, depth ${depth}`;
       const header = `blast radius: ${node.qualifiedName} (${scope}) — ${affected.length} affected`;
-      // ...and its truncation notice offers the bounded-view tool instead of a no-op depth narrowing
+      const { shown, hidden } = capList(affected, limit);
+      const more = hidden > 0 ? [`… +${hidden} more (raise limit)`] : [];
+      // ...and its line-cap notice offers the bounded-view tool instead of a no-op depth narrowing
       const notice =
         direction === "callers"
-          ? (omitted: number) => `(truncated, ${omitted} more — use closegraph_subgraph for a bounded view)`
-          : (omitted: number) => `(truncated, ${omitted} more — narrow depth or use closegraph_subgraph)`;
-      const { lines } = capLines([header, ...note, ...affected], MAX_LINES, notice);
+          ? (omitted: number) => `(truncated, ${omitted} more — raise limit or use closegraph_subgraph for a bounded view)`
+          : (omitted: number) => `(truncated, ${omitted} more — raise limit, narrow depth, or use closegraph_subgraph)`;
+      const { lines } = capLines([header, ...note, ...groupByFile(shown), ...more], MAX_LINES, notice);
 
       return {
         content: lines.join("\n"),
-        metadata: { direction, depth, seeds: [node.qualifiedName], affected, graph },
+        // metadata is not model-visible; content carries the grouped names, so counts suffice here
+        metadata: { direction, depth, limit, affectedCount: affected.length, graph },
       };
     },
   };

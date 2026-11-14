@@ -1,18 +1,21 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import { createGraphService, GraphUnavailableError, type GraphService, type GraphHandle } from "./graph-service.js";
 import { resolveRef, type Resolution } from "./resolve-ref.js";
-import { capLines, clampDepth, graphMeta, stalenessNoteLines } from "./render-utils.js";
+import { capLines, capList, clampDepth, graphMeta, groupByFile, stalenessNoteLines } from "./render-utils.js";
 
 const DEFAULT_DEPTH = 1;
 const MAX_DEPTH = 3;
 const MIN_REFS = 1;
 const MAX_REFS = 5;
 const MAX_LINES = 200;
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
 
 export interface SubgraphInput {
   refs: string[];
   depth?: number;
   direction?: "out" | "in" | "any";
+  limit?: number;
 }
 
 /** One line per ref that failed to resolve, so the caller can fix every seed in one round trip. */
@@ -56,6 +59,14 @@ export function createSubgraphTool(service: GraphService): Info {
           maximum: MAX_DEPTH,
           multipleOf: 1,
           description: `BFS hops from the seeds (default ${DEFAULT_DEPTH}, max ${MAX_DEPTH})`,
+        },
+        limit: {
+          type: "number",
+          default: DEFAULT_LIMIT,
+          minimum: 1,
+          maximum: MAX_LIMIT,
+          multipleOf: 1,
+          description: `Max nodes and edge lines listed (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}); the header counts are always exact`,
         },
         direction: {
           type: "string",
@@ -107,28 +118,45 @@ export function createSubgraphTool(service: GraphService): Info {
 
       const depth = clampDepth(input.depth, DEFAULT_DEPTH, MAX_DEPTH);
       const direction = input.direction ?? "any";
+      // clampDepth is a generic [1, max] clamp with default — limit uses the same bounds logic
+      const limit = clampDepth(input.limit, DEFAULT_LIMIT, MAX_LIMIT);
       const view = handle.store.subgraph(seedIds, { depth, direction: STORE_DIRECTION[direction] });
 
       const qualified = (id: string): string => handle.store.getNode(id)?.qualifiedName ?? id;
       const nodes = view.nodes.map((n) => n.qualifiedName).sort((a, b) => a.localeCompare(b));
-      const edges = view.edges
+      const edgeLines = view.edges
         .filter((e) => e.kind === "calls")
-        .map((e) => [qualified(e.from), qualified(e.to)] as [string, string])
-        .sort((a, b) => `${a[0]} -> ${a[1]}`.localeCompare(`${b[0]} -> ${b[1]}`));
+        .map((e) => `${qualified(e.from)} -> ${qualified(e.to)}` as string)
+        .sort((a, b) => a.localeCompare(b));
 
+      const { shown: shownNodes, hidden: hiddenNodes } = capList(nodes, limit);
+      const { shown: shownEdges, hidden: hiddenEdges } = capList(edgeLines, limit);
       const allLines = [
-        `subgraph (direction ${direction}, depth ${depth}): ${nodes.length} nodes, ${edges.length} edges`,
+        `subgraph (direction ${direction}, depth ${depth}): ${nodes.length} nodes, ${edgeLines.length} edges`,
         ...note,
         `nodes (${nodes.length}):`,
-        ...nodes,
-        `edges (${edges.length}):`,
-        ...edges.map(([from, to]) => `${from} -> ${to}`),
+        ...groupByFile(shownNodes),
+        ...(hiddenNodes > 0 ? [`… +${hiddenNodes} more (raise limit)`] : []),
+        `edges (${edgeLines.length}):`,
+        ...shownEdges,
+        ...(hiddenEdges > 0 ? [`… +${hiddenEdges} more (raise limit)`] : []),
       ];
-      const { lines, truncated } = capLines(allLines, MAX_LINES, (omitted) => `(truncated, ${omitted} more — narrow depth or use fewer refs)`);
+      const { lines, truncated: lineCapped } = capLines(
+        allLines,
+        MAX_LINES,
+        (omitted) => `(truncated, ${omitted} more — raise limit, narrow depth, or use fewer refs)`,
+      );
 
       return {
         content: lines.join("\n"),
-        metadata: { nodes, edges, truncated, graph },
+        // metadata is not model-visible; content carries the grouped names, so counts suffice here
+        metadata: {
+          nodeCount: nodes.length,
+          edgeCount: edgeLines.length,
+          limit,
+          truncated: lineCapped || hiddenNodes > 0 || hiddenEdges > 0,
+          graph,
+        },
       };
     },
   };

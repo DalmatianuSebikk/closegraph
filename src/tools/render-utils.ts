@@ -1,6 +1,6 @@
 import type { GraphHandle } from "./graph-service.js";
 
-/** Clamp an optional depth argument to [1, max], defaulting when absent. */
+/** Clamp an optional numeric argument (depth, limit) to [1, max], defaulting when absent. */
 export function clampDepth(depth: number | undefined, fallback: number, max: number): number {
   return Math.min(max, Math.max(1, depth ?? fallback));
 }
@@ -20,6 +20,22 @@ export function capLines(
 export function capList(items: string[], max: number): { shown: string[]; hidden: number } {
   if (items.length <= max) return { shown: items, hidden: 0 };
   return { shown: items.slice(0, max), hidden: items.length - max };
+}
+
+/** Group qualified names by file, one line per file: `src/lib/util.ts: formatName, shout`. */
+export function groupByFile(qualifiedNames: string[]): string[] {
+  const byFile = new Map<string, string[]>();
+  for (const qualifiedName of qualifiedNames) {
+    const hash = qualifiedName.indexOf("#");
+    const file = hash === -1 ? qualifiedName : qualifiedName.slice(0, hash);
+    const bare = hash === -1 ? qualifiedName : qualifiedName.slice(hash + 1);
+    const names = byFile.get(file);
+    if (names === undefined) byFile.set(file, [bare]);
+    else names.push(bare);
+  }
+  return [...byFile.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([file, names]) => `${file}: ${names.sort((a, b) => a.localeCompare(b)).join(", ")}`);
 }
 
 /** Provenance of the graph behind a tool result (Ruling 13: staleness must reach the output). */
