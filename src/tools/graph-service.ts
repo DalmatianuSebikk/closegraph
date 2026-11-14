@@ -1,14 +1,14 @@
-import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { indexRepo } from "../indexer/pipeline.js";
+import type { IndexMetrics, LanguageRunMetrics } from "../indexer/pipeline.js";
 import { isStale, restoreSnapshot, takeSnapshot } from "../graph/snapshot.js";
 import type { SnapshotData } from "../graph/snapshot.js";
 import type { GraphStore } from "../graph/store.js";
-import type { IndexResult } from "../indexer/pipeline.js";
 
-export type IndexMetrics = IndexResult["metrics"];
+export type { IndexMetrics, LanguageRunMetrics };
 
-/** Raised by get() when the root is not an indexable TypeScript project; tools catch and render it. */
+/** Raised by get() when nothing in the root is indexable (Task 8 merged gate:
+ *  TypeScript/JavaScript plus the language packs); tools catch and render it. */
 export class GraphUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -78,14 +78,40 @@ async function currentGitHead(root: string): Promise<string | undefined> {
   }
 }
 
-/** Snapshots persist edges, not per-site metrics: fall back to an edge-based breakdown (cli.ts precedent). */
+/** Snapshots persist edges, not per-site metrics: fall back to an edge-based breakdown (cli.ts precedent).
+ *  languages roll up from node.language the same way — snapshots keep the field (v2), so the
+ *  per-language view survives a restore with edge-based numbers instead of site-based ones. */
 function edgeBasedMetrics(store: GraphStore): IndexMetrics {
+  const languages: Record<string, LanguageRunMetrics> = {};
+  const langOf = (language: string | undefined): LanguageRunMetrics => {
+    const key = language ?? "typescript";
+    return (languages[key] ??= {
+      files: 0,
+      callSites: 0,
+      resolved: 0,
+      unresolved: 0,
+      external: 0,
+      inferred: 0,
+      unparseable: 0,
+      dangerousSinks: 0,
+    });
+  };
   let resolved = 0;
   let unresolved = 0;
   for (const node of store.allNodes()) {
+    const lang = langOf(node.language);
+    if (node.kind === "File") lang.files++;
+    for (const dc of node.dangerousCalls ?? []) lang.dangerousSinks += dc.count;
     for (const edge of store.edgesFrom(node.id, "calls")) {
-      if (edge.unresolved) unresolved++;
-      else resolved++;
+      if (edge.unresolved) {
+        unresolved++;
+        lang.unresolved++;
+      } else {
+        resolved++;
+        lang.resolved++;
+      }
+      if (edge.inferred === true) lang.inferred++;
+      lang.callSites++;
     }
   }
   return {
@@ -96,6 +122,7 @@ function edgeBasedMetrics(store: GraphStore): IndexMetrics {
     files: store.stats().files,
     dynamicImports: 0,
     durationMs: 0,
+    languages,
   };
 }
 
@@ -105,11 +132,13 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
   const SNAPSHOT_KEY = snapshotStorageKey(root);
 
   async function build(progress?: (msg: string) => void): Promise<GraphHandle> {
-    if (!existsSync(join(root, "tsconfig.json"))) {
-      throw new GraphUnavailableError(`tsconfig.json not found in ${root} — closegraph requires a TypeScript project`);
-    }
     progress?.(`[closegraph] indexing ${root}`);
-    const result = indexRepo(root);
+    const result = await indexRepo(root);
+    if (result.metrics.files === 0) {
+      throw new GraphUnavailableError(
+        `no indexable files in ${root} — closegraph indexes TypeScript/JavaScript plus python, php and bash pack files`,
+      );
+    }
     progress?.(`[closegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
     if (storage !== undefined) {
       try {

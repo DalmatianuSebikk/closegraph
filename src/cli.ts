@@ -2,10 +2,10 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { execSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { indexRepo } from "./indexer/pipeline.js";
+import type { IndexResult } from "./indexer/pipeline.js";
 import { isStale, restoreSnapshot, takeSnapshot } from "./graph/snapshot.js";
 import type { GraphStore } from "./graph/store.js";
 import type { SnapshotData } from "./graph/snapshot.js";
-import type { CallMetrics } from "./indexer/extract.js";
 import type { GraphEdge } from "./graph/types.js";
 
 const USAGE =
@@ -161,7 +161,7 @@ function currentGitHead(): string | undefined {
 interface LoadedGraph {
   store: GraphStore;
   /** site-based metrics when freshly indexed; undefined when reused from a snapshot */
-  metrics?: CallMetrics & { files: number; dynamicImports: number; durationMs: number };
+  metrics?: IndexResult["metrics"];
 }
 
 /**
@@ -210,7 +210,7 @@ function snapshotIgnored(repo: string, path: string): boolean {
     });
 }
 
-function loadGraph(): LoadedGraph {
+async function loadGraph(): Promise<LoadedGraph> {
   // snapshot reuse: staleness needs a gitHead on BOTH sides (ledger Ruling 13 —
   // undefined on either side means "cannot detect staleness", i.e. not stale)
   if (snapshotPath !== undefined && existsSync(snapshotPath)) {
@@ -241,8 +241,14 @@ function loadGraph(): LoadedGraph {
       console.log(`[closegraph] snapshot ${snapshotPath} unreadable (${(error as Error).message}) — reindexing`);
     }
   }
-  const result = indexRepo(repoPath);
+  const result = await indexRepo(repoPath);
   console.log(`[closegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
+  const packLine = Object.entries(result.metrics.languages)
+    .filter(([language, m]) => language !== "typescript" && language !== "javascript" && m.files > 0)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([language, m]) => `${language}: ${m.files} files, ${m.resolved}/${m.callSites} call sites resolved`)
+    .join("; ");
+  if (packLine !== "") console.log(`language packs: ${packLine}`);
   if (snapshotPath !== undefined) {
     writeAtomic(snapshotPath, JSON.stringify(takeSnapshot(result.store, repoPath, currentGitHead()), null, 2));
     console.log(`[closegraph] snapshot written to ${snapshotPath}`);
@@ -250,7 +256,7 @@ function loadGraph(): LoadedGraph {
   return result;
 }
 
-const { store, metrics } = loadGraph();
+const { store, metrics } = await loadGraph();
 
 const stats = store.stats();
 console.log(

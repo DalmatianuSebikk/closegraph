@@ -109,10 +109,10 @@ async function runToolByteMetrics(handle: GraphHandle): Promise<void> {
   }
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const repoRoot = resolve(process.argv[2] ?? join(import.meta.dir, "..", "vendor/excalidraw"));
 
-  const { store, metrics } = indexRepo(repoRoot);
+  const { store, metrics } = await indexRepo(repoRoot);
   const stats = store.stats();
   const inProject = metrics.resolved + metrics.unresolved;
   const resolutionRate = inProject > 0 ? metrics.resolved / inProject : 1;
@@ -166,7 +166,7 @@ function main(): void {
   if (resolutionRate < 0.8) printUnresolvedBreakdown();
 
   // Task 9: per-tool token-spend metrics over the already-indexed graph
-  void runToolByteMetrics({ store, metrics, source: "built", staleness: "fresh" });
+  await runToolByteMetrics({ store, metrics, source: "built", staleness: "fresh" });
 }
 
-if (import.meta.main) main();
+if (import.meta.main) await main();
