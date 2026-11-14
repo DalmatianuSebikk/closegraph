@@ -49,10 +49,14 @@ bun run src/cli.ts <repo> hook uninstall        # removes only closegraph's own 
 
 `graph.json` uses the same snapshot format the plugin restores, so it round-trips
 through the CLI: `bun run src/cli.ts <repo> --snapshot graph.json` reuses it
-instead of re-indexing. The CLI is graph.json's consumer — the plugin's own tools
-read their cached snapshot from plugin storage, never from repo files. `hook
-install` refuses to overwrite an existing post-commit hook; the hook refreshes
-the gitignored `closegraph.snapshot.json` in the background right after every
+instead of re-indexing. A stale graph.json is re-indexed and rewritten in place —
+expect and commit the diff, or keep graph.json uncommitted. The CLI is
+graph.json's consumer — the plugin's own tools read their cached snapshot from
+plugin storage, never from repo files. `hook install` refuses to overwrite an
+existing post-commit hook; when the target repo does not already ignore
+`closegraph.snapshot.json`, install adds it to `.git/info/exclude` itself (local
+only — the worktree stays clean) and says so, warning instead when that is not
+possible. The hook refreshes the snapshot in the background right after every
 commit (the first index of a large repo takes seconds — it never blocks the
 commit itself), keeping staleness detectable on the next CLI run.
 

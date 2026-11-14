@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { indexRepo } from "./indexer/pipeline.js";
@@ -105,6 +105,22 @@ if (hookMode) {
     writeFileSync(hook, snippet, { mode: 0o755 });
     console.log(`[closegraph] post-commit hook installed → ${hook}`);
     console.log(`[closegraph] it re-indexes ${repoPath} in the background after every commit, refreshing ${snapshotOut}`);
+    // the hook's snapshot must not surface as untracked noise in THIS repo (final
+    // review I1): if nothing ignores it, exclude it locally — never edit .gitignore
+    if (!snapshotIgnored(repoPath, snapshotOut)) {
+      const exclude = join(repoPath, ".git", "info", "exclude");
+      try {
+        mkdirSync(dirname(exclude), { recursive: true });
+        appendFileSync(exclude, `\n# closegraph post-commit hook artifact\n${basename(snapshotOut)}\n`);
+        console.log(
+          `[closegraph] ${basename(snapshotOut)} is not git-ignored — added it to .git/info/exclude (local only; your worktree stays clean)`,
+        );
+      } catch {
+        console.error(
+          `[closegraph] warning: ${basename(snapshotOut)} is not git-ignored and .git/info/exclude is not writable — add it to your .gitignore or it will show as untracked`,
+        );
+      }
+    }
     process.exit(0);
   }
   // uninstall
@@ -140,11 +156,40 @@ interface LoadedGraph {
  * Atomic file write (review M1): temp file in the SAME directory, then rename —
  * POSIX rename is atomic, so concurrent hook-triggered runs can never interleave
  * into a torn snapshot (the reader self-heals, but never even sees a partial file).
+ * The finally-cleanup covers a failed rename leaving the dot-prefixed temp behind
+ * (final-review carried (a): the temp's `.tmp-<pid>` suffix escapes `*.snapshot.json`).
  */
 function writeAtomic(path: string, contents: string): void {
   const tmp = join(dirname(path), `.${basename(path)}.tmp-${process.pid}`);
   writeFileSync(tmp, contents);
-  renameSync(tmp, path);
+  try {
+    renameSync(tmp, path);
+  } finally {
+    if (existsSync(tmp)) rmSync(tmp, { force: true });
+  }
+}
+
+/** True when git already ignores the path: `git check-ignore -q`, with a simple
+ *  .gitignore-glob scan as the fallback for check-ignore failures (final review I1). */
+function snapshotIgnored(repo: string, path: string): boolean {
+  const check = Bun.spawnSync(["git", "check-ignore", "-q", "--", path], {
+    cwd: repo,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if (check.exitCode === 0) return true;
+  const gitignore = join(repo, ".gitignore");
+  if (!existsSync(gitignore)) return false;
+  const base = basename(path);
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return readFileSync(gitignore, "utf8")
+    .split("\n")
+    .some((line) => {
+      const pattern = line.trim();
+      if (pattern === "" || pattern.startsWith("#") || pattern.startsWith("!")) return false;
+      const glob = new RegExp(`^${pattern.split("*").map(escape).join(".*")}$`);
+      return glob.test(base) || glob.test(`/${base}`);
+    });
 }
 
 function loadGraph(): LoadedGraph {
@@ -154,18 +199,26 @@ function loadGraph(): LoadedGraph {
     let snap: SnapshotData | undefined;
     try {
       snap = JSON.parse(readFileSync(snapshotPath, "utf8")) as SnapshotData;
-      const store = restoreSnapshot(snap);
-      const head = currentGitHead();
-      if (snap.gitHead === undefined || head === undefined) {
-        const why = snap.gitHead === undefined ? "snapshot has no git head" : "repo has no git head";
-        console.log(`[closegraph] cannot detect staleness (${why}) — reusing snapshot ${snapshotPath}`);
-        return { store };
+      // same repoRoot match the plugin side performs (graph-service): a snapshot from
+      // another repo must never be served for this one (final review M8)
+      if (snap.repoRoot !== repoPath) {
+        console.log(
+          `[closegraph] snapshot ${snapshotPath} was taken for a different repo (${String(snap.repoRoot)}) — refusing it, reindexing`,
+        );
+      } else {
+        const store = restoreSnapshot(snap);
+        const head = currentGitHead();
+        if (snap.gitHead === undefined || head === undefined) {
+          const why = snap.gitHead === undefined ? "snapshot has no git head" : "repo has no git head";
+          console.log(`[closegraph] cannot detect staleness (${why}) — reusing snapshot ${snapshotPath}`);
+          return { store };
+        }
+        if (!isStale(snap, head)) {
+          console.log(`[closegraph] snapshot ${snapshotPath} is up to date — reusing`);
+          return { store };
+        }
+        console.log(`[closegraph] snapshot ${snapshotPath} is stale — reindexing`);
       }
-      if (!isStale(snap, head)) {
-        console.log(`[closegraph] snapshot ${snapshotPath} is up to date — reusing`);
-        return { store };
-      }
-      console.log(`[closegraph] snapshot ${snapshotPath} is stale — reindexing`);
     } catch (error) {
       console.log(`[closegraph] snapshot ${snapshotPath} unreadable (${(error as Error).message}) — reindexing`);
     }
@@ -203,7 +256,9 @@ if (exportPath !== undefined) {
     ...snap,
     edges: snap.edges.map((e) => ({ ...e, provenance: edgeProvenance(e) })),
   };
-  writeFileSync(exportPath, JSON.stringify(enriched, null, 2));
+  // graph.json is the file users are told to commit — it gets the same atomic
+  // write as the snapshot (final review M7)
+  writeAtomic(exportPath, JSON.stringify(enriched, null, 2));
   console.log(`[closegraph] graph.json exported to ${exportPath} (${enriched.edges.length} edges tagged with provenance)`);
 }
 

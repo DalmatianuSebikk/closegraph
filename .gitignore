@@ -19,6 +19,7 @@ coverage/
 
 # graph artifacts (snapshot output from Task 6/13 tooling)
 *.snapshot.json
+.closegraph.snapshot.json.tmp-*
 
 # security-research artifacts (cybermes phase-2 convention)
 reports/
