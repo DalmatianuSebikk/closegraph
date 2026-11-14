@@ -62,8 +62,9 @@ export const HISTORY_CAP = 50;
 /** Rendered actions footer — pinned text; bracket tokens mirror EGO_KEYMAP (esc rides Task 5's route). */
 export const EGO_ACTIONS_LINE = "[h/l] columns  [j/k] rows  [enter] re-center  [u] back a center  [r] refresh  [esc] back a screen";
 
-/** List-view names per side — mirrors the rpc's EGO_CAP (15); payload is already capped, this is the belt. */
-const LIST_CAP = 15;
+/** List-view names per side — MUST mirror the rpc's EGO_CAP (src/rpc-methods.ts); pinned
+ *  equal by test so drift breaks the build's test, not users. */
+export const LIST_CAP = 15;
 
 const DEFAULT_DIMS: Dims = { width: 80, height: 24 };
 
@@ -308,8 +309,12 @@ export function createEgoModel(deps: {
       recenter(target);
     },
 
-    /** u/backspace: restore the previous center from cache — NO rpc call. No-op at depth 0. */
+    /** u/backspace: restore the previous center from cache — NO rpc call. No-op at depth 0.
+     *  Bumping loadSeq FIRST kills any in-flight load (an open's re-fetch or a refresh):
+     *  without it, a pending load would resolve AFTER the pop and apply() over the
+     *  restored center — destroying the history entry the user just asked for. */
     backCenter(): void {
+      loadSeq++;
       const entry = history.pop();
       if (entry === undefined) return;
       currentRef = entry.ref;
@@ -322,7 +327,10 @@ export function createEgoModel(deps: {
       if (mode === "graph" && fullCanvas !== undefined) {
         const mid = selectedRowOf(cur);
         const max = Math.max(1, dims.height - RESERVED_ROWS);
-        scroll = Math.max(0, Math.min(scroll, mid));
+        // top clamp to mid - 2 = the box's TOP row: the selected box never renders
+        // half-clipped (label row cut off) when the cursor moves up; the bottom clamp
+        // still guarantees the mid row stays visible in tiny windows (max < 3).
+        scroll = Math.max(0, Math.min(scroll, mid - 2));
         scroll = Math.max(scroll, mid - max + 1);
         const rows = fullCanvas.rows.slice(scroll, scroll + max);
         canvas = { rows, width: fullCanvas.width, height: rows.length, undrawnEdges: fullCanvas.undrawnEdges };
