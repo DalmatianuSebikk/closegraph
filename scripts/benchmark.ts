@@ -45,7 +45,8 @@ export function packStatsLines(metrics: IndexResult["metrics"]): string[] {
 }
 
 /** 10 representative refs pinned from the excalidraw fixture (pinned commit in
- *  docs/superpowers/spikes/m1-benchmark.md) — the SAME list every run, by design. */const BENCHMARK_REFS = {
+ *  docs/superpowers/spikes/m1-benchmark.md) — the SAME list every run, by design. */
+const BENCHMARK_REFS = {
   hubs: [
     "packages/math/src/point.ts#pointFrom", // 235 callers
     "packages/element/src/Scene.ts#Scene.getNonDeletedElementsMap", // 140 callers
@@ -73,7 +74,8 @@ const toolCtx = {
 } as unknown as Parameters<Info["execute"]>[1];
 
 /** After the resolution run: execute the 4 tools over the pinned refs, print avg/p95/p100
- *  output bytes per tool + total (bytes only — no timing noise). */async function runToolByteMetrics(handle: GraphHandle): Promise<void> {
+ *  output bytes per tool + total (bytes only — no timing noise). */
+async function runToolByteMetrics(handle: GraphHandle): Promise<void> {
   const service: GraphService = {
     // reuse the already-indexed graph — never re-index inside the metric pass
     get: async () => handle,

@@ -32,8 +32,9 @@ export class GrammarMissingError extends Error {
 
 export type ParseFn = (source: string) => SyntaxNode;
 
-/** Wasms live uncommitted in gitignored vendor/grammars/ (spike decision; CI-build
- *  vs vendored-with-provenance is decided when the packs land). */
+/** Grammar wasms are COMMITTED binaries under vendor/grammars/ (final Ruling 10)
+ *  — a fresh clone works with no build step. Sourcing (repo + pinned commit), the
+ *  MIT license notes, and the rebuild recipe live in vendor/grammars/PROVENANCE.md. */
 const GRAMMAR_DIR = join(dirname(import.meta.path), "..", "..", "vendor", "grammars");
 
 /** Absolute path of a grammar's wasm: vendor/grammars/tree-sitter-<grammarName>.wasm. */

@@ -54,11 +54,12 @@ export function hasBashShebang(absPath: string): boolean {
 }
 
 /** The lowercase extension of a path's basename, posix-style; "" when there is
- *  none (a leading dot alone is not an extension: ".gitignore" → ""). */
+ *  none (a leading dot alone is not an extension: ".gitignore" → ""). Uppercase
+ *  suffixes are claimed too: `Module.PY` lowercases to `.py` (final-review minor 3). */
 export function fileExtension(relPath: string): string {
   const base = relPath.split("/").pop() ?? relPath;
   const dot = base.lastIndexOf(".");
-  return dot > 0 ? base.slice(dot) : "";
+  return dot > 0 ? base.slice(dot).toLowerCase() : "";
 }
 
 /** Repo-relative posix paths (sorted) of every file this pack owns under repoRoot:
