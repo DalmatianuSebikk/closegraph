@@ -151,6 +151,10 @@ export const MAP_KEYMAP = {
   refresh: ["r"],
   palette: ["p"],
   cycleLanguage: ["l"],
+  /** q quits FROM THE TOP LEVEL; escape joins it here because the screens'
+   *  own keymaps pop first (this map is only consulted when no screen is
+   *  stacked and the palette is closed — so q still types into the filter). */
+  quit: ["q", "escape"],
 } as const
 
 const SYMBOLS_KEYMAP = { ...SYMBOL_VIEW_KEYMAP, palette: ["p"] } as const
@@ -202,6 +206,19 @@ export function pickAskAgentSession(sessions: AskAgentSession[], currentDirector
     (s) => s.parentID === undefined && s.location !== undefined && normalize(s.location.directory) === here,
   )
   return roots.sort((a, b) => b.time.updated - a.time.updated).at(0)?.id
+}
+
+/** Where the quit key navigates (live hotfix): back to the newest root session in
+ *  this project — the same session-picking rules as ask-agent — and to the pinned
+ *  `{ type: "home" }` route when no same-project session exists (never a guess).
+ *  Both Destination shapes come straight from the installed tui context d.ts
+ *  (Route = {type:"home"} | {type:"session",sessionID} | {type:"plugin",…}). */
+export function quitDestination(
+  sessions: AskAgentSession[],
+  currentDirectory: string | undefined,
+): { type: "session"; sessionID: string } | { type: "home" } {
+  const sessionID = pickAskAgentSession(sessions, currentDirectory)
+  return sessionID !== undefined ? { type: "session", sessionID } : { type: "home" }
 }
 
 /**
@@ -363,6 +380,13 @@ function CodeGraphRoute() {
           fileMap.cycleLanguageFilter()
           syncMap()
           break
+        case "quit":
+          key.preventDefault()
+          // close the graph view and return to chat: newest root session in this
+          // project, else the home route (quitDestination — same d.ts-pinned shapes
+          // ask-agent navigates with)
+          context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
+          break
         default:
           break
       }
@@ -492,7 +516,7 @@ function CodeGraphRoute() {
         ))}
       </box>
       <text width="100%" height={1} flexShrink={0} fg="gray">
-        {"↑/↓ or j/k move · enter open · r refresh · l language · p jump to symbol"}
+        {"↑/↓ or j/k move · enter open · r refresh · l language · p jump to symbol · q quit"}
       </text>
     </box>
   )
