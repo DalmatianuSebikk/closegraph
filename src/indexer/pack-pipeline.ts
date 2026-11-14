@@ -100,121 +100,130 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
       throw error;
     }
 
-    // phase 1: extract every file of this pack
-    const records: FilePass[] = [];
-    for (const relPath of files) {
-      const source = await Bun.file(join(repoRoot, relPath)).text();
-      records.push({ relPath, extraction: pack.extract(parse(source), relPath, source) });
-    }
-    for (const relPath of files) walked.add(relPath);
-
-    // sinks fold into node dangerousCalls BEFORE the nodes land in the store
-    const dangerous = foldSinks(records);
-    for (const { relPath, extraction } of records) {
-      for (const node of extraction.nodes) {
-        const stamped = dangerous.get(node.id);
-        store.upsertNode(stamped === undefined ? node : { ...node, dangerousCalls: stamped });
+    // per-pack crash isolation (final review Important 2): a throwing extract() —
+    // or any failure later in this pack's pass — skips THAT pack with a note,
+    // mirroring the grammar-missing path; the ts-morph graph and every other
+    // pack's contribution survive. The extract loop runs BEFORE any node of this
+    // pack lands in the store, so a mid-pack failure leaves no partial nodes.
+    try {
+      const records: FilePass[] = [];
+      for (const relPath of files) {
+        const source = await Bun.file(join(repoRoot, relPath)).text();
+        records.push({ relPath, extraction: pack.extract(parse(source), relPath, source) });
       }
-    }
+      for (const relPath of files) walked.add(relPath);
 
-    // literal imports close over the walked set (pack edges carry inferred)
-    const pendingImports: GraphEdge[] = [];
-    for (const { relPath, extraction } of records) {
-      for (const target of extraction.importTargets) {
-        if (!walked.has(target)) continue;
-        pendingImports.push({
-          kind: "imports",
-          from: makeNodeId("File", relPath),
-          to: makeNodeId("File", target),
-          inferred: true,
-        });
-      }
-    }
-
-    // repo-wide short-class-name map over this pack's files (deterministic: first file wins)
-    const classFiles = new Map<string, string>();
-    if (pack.resolution.classIndex) {
+      // sinks fold into node dangerousCalls BEFORE the nodes land in the store
+      const dangerous = foldSinks(records);
       for (const { relPath, extraction } of records) {
         for (const node of extraction.nodes) {
-          if (node.kind === "Class" && !classFiles.has(node.name)) classFiles.set(node.name, relPath);
+          const stamped = dangerous.get(node.id);
+          store.upsertNode(stamped === undefined ? node : { ...node, dangerousCalls: stamped });
         }
       }
-    }
 
-    // literal include/source closure per file (same-pack, cycle-safe, walked-only)
-    const importTargetsOf = new Map(records.map((r) => [r.relPath, r.extraction.importTargets] as const));
-    function closureOf(relPath: string): Set<string> {
-      const seen = new Set<string>([relPath]);
-      const queue = [relPath];
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        for (const target of importTargetsOf.get(current) ?? []) {
-          if (walked.has(target) && !seen.has(target)) {
-            seen.add(target);
-            queue.push(target);
-          }
-        }
-      }
-      return seen;
-    }
-
-    // same-file resolved call edges + contains edges land now that nodes exist
-    for (const { relPath, extraction } of records) {
-      for (const edge of extraction.edges) store.addEdge(edge);
-    }
-    for (const edge of pendingImports) store.addEdge(edge);
-
-    // phase 2: resolve every externalRef over the walked set — or keep it as an
-    // unresolved edge named by the exact expression text (never dropped)
-    const resolveOne = (ref: ExternalCallRef, relPath: string): string | undefined =>
-      resolveRef(pack, ref, relPath, store, classFiles, importTargetsOf, closureOf, walked);
-
-    let sameFileResolved = 0;
-    let externalNoRef = 0;
-    let phase2Resolved = 0;
-
-    for (const { relPath, extraction } of records) {
-      sameFileResolved += extraction.metrics.resolved;
-      externalNoRef += extraction.metrics.external;
-
-      for (const ref of extraction.externalRefs) {
-        const from = callerIdOf(relPath, ref.fromSymbolPath);
-        const target = resolveOne(ref, relPath);
-        if (target !== undefined && store.getNode(from) !== undefined) {
-          phase2Resolved++;
-          store.addEdge({ kind: "calls", from, to: target, inferred: true });
-        } else {
-          store.addEdge({
-            kind: "calls",
-            from,
-            to: `external:${ref.expressionText}`,
-            unresolved: true,
-            targetName: ref.expressionText,
+      // literal imports close over the walked set (pack edges carry inferred)
+      const pendingImports: GraphEdge[] = [];
+      for (const { relPath, extraction } of records) {
+        for (const target of extraction.importTargets) {
+          if (!walked.has(target)) continue;
+          pendingImports.push({
+            kind: "imports",
+            from: makeNodeId("File", relPath),
+            to: makeNodeId("File", target),
+            inferred: true,
           });
         }
       }
-      externalNoRef += extraction.metrics.unresolved - extraction.externalRefs.length;
-    }
-    if (externalNoRef < 0) externalNoRef = 0; // defensive: pack metrics and refs cannot disagree, but never lie negative
 
-    const totals = records.reduce(
-      (acc, { extraction }) => ({
-        callSites: acc.callSites + extraction.metrics.callSites,
-        unparseable: acc.unparseable + extraction.metrics.unparseable,
-        sinks: acc.sinks + extraction.sinks.length,
-      }),
-      { callSites: 0, unparseable: 0, sinks: 0 },
-    );
-    metrics[pack.id] = {
-      files: records.length,
-      callSites: totals.callSites,
-      resolved: sameFileResolved + phase2Resolved,
-      unresolved: records.reduce((acc, { extraction }) => acc + extraction.externalRefs.length, 0) - phase2Resolved,
-      external: externalNoRef,
-      inferred: phase2Resolved,
-      unparseable: totals.unparseable,
-      dangerousSinks: totals.sinks,
-    };
+      // repo-wide short-class-name map over this pack's files (deterministic: first file wins)
+      const classFiles = new Map<string, string>();
+      if (pack.resolution.classIndex) {
+        for (const { relPath, extraction } of records) {
+          for (const node of extraction.nodes) {
+            if (node.kind === "Class" && !classFiles.has(node.name)) classFiles.set(node.name, relPath);
+          }
+        }
+      }
+
+      // literal include/source closure per file (same-pack, cycle-safe, walked-only)
+      const importTargetsOf = new Map(records.map((r) => [r.relPath, r.extraction.importTargets] as const));
+      function closureOf(relPath: string): Set<string> {
+        const seen = new Set<string>([relPath]);
+        const queue = [relPath];
+        while (queue.length > 0) {
+          const current = queue.shift()!;
+          for (const target of importTargetsOf.get(current) ?? []) {
+            if (walked.has(target) && !seen.has(target)) {
+              seen.add(target);
+              queue.push(target);
+            }
+          }
+        }
+        return seen;
+      }
+
+      // same-file resolved call edges + contains edges land now that nodes exist
+      for (const { relPath, extraction } of records) {
+        for (const edge of extraction.edges) store.addEdge(edge);
+      }
+      for (const edge of pendingImports) store.addEdge(edge);
+
+      // phase 2: resolve every externalRef over the walked set — or keep it as an
+      // unresolved edge named by the exact expression text (never dropped)
+      const resolveOne = (ref: ExternalCallRef, relPath: string): string | undefined =>
+        resolveRef(pack, ref, relPath, store, classFiles, importTargetsOf, closureOf, walked);
+
+      let sameFileResolved = 0;
+      let externalNoRef = 0;
+      let phase2Resolved = 0;
+
+      for (const { relPath, extraction } of records) {
+        sameFileResolved += extraction.metrics.resolved;
+        externalNoRef += extraction.metrics.external;
+
+        for (const ref of extraction.externalRefs) {
+          const from = callerIdOf(relPath, ref.fromSymbolPath);
+          const target = resolveOne(ref, relPath);
+          if (target !== undefined && store.getNode(from) !== undefined) {
+            phase2Resolved++;
+            store.addEdge({ kind: "calls", from, to: target, inferred: true });
+          } else {
+            store.addEdge({
+              kind: "calls",
+              from,
+              to: `external:${ref.expressionText}`,
+              unresolved: true,
+              targetName: ref.expressionText,
+            });
+          }
+        }
+        externalNoRef += extraction.metrics.unresolved - extraction.externalRefs.length;
+      }
+      if (externalNoRef < 0) externalNoRef = 0; // defensive: pack metrics and refs cannot disagree, but never lie negative
+
+      const totals = records.reduce(
+        (acc, { extraction }) => ({
+          callSites: acc.callSites + extraction.metrics.callSites,
+          unparseable: acc.unparseable + extraction.metrics.unparseable,
+          sinks: acc.sinks + extraction.sinks.length,
+        }),
+        { callSites: 0, unparseable: 0, sinks: 0 },
+      );
+      metrics[pack.id] = {
+        files: records.length,
+        callSites: totals.callSites,
+        resolved: sameFileResolved + phase2Resolved,
+        unresolved: records.reduce((acc, { extraction }) => acc + extraction.externalRefs.length, 0) - phase2Resolved,
+        external: externalNoRef,
+        inferred: phase2Resolved,
+        unparseable: totals.unparseable,
+        dangerousSinks: totals.sinks,
+      };
+    } catch (error) {
+      notes.push(`pack failed: ${pack.id} (${error instanceof Error ? error.message : String(error)})`);
+      continue;
+    }
   }
 
   return { metrics, notes };

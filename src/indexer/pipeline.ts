@@ -37,6 +37,9 @@ export interface IndexResult {
     /** keys: "typescript" | "javascript" + pack ids ("python" | "php" | "bash"), files > 0 only */
     languages: Record<string, LanguageRunMetrics>;
   };
+  /** pack-degradation notes (grammar missing / pack failed) — surfaced by the
+   *  CLI and graph-service progress; empty on a fully healthy index */
+  notes: string[];
 }
 
 const SKIPPED_DIRS = new Set(SKIP_DIR_NAMES); // shared with pack discovery — vendor/ joins the TS pass here
@@ -103,6 +106,7 @@ export function indexTsRepo(repoRoot: string): IndexResult {
     durationMs: 0,
     languages: {},
   };
+  const notes: string[] = [];
   const pendingEdges: GraphEdge[] = [];
   const walked = new Set(relPaths);
 
@@ -155,7 +159,7 @@ export function indexTsRepo(repoRoot: string): IndexResult {
   for (const edge of pendingEdges) store.addEdge(edge);
 
   metrics.durationMs = Math.round(performance.now() - startedAt);
-  return { store, metrics };
+  return { store, metrics, notes };
 }
 
 /**
@@ -172,7 +176,8 @@ export async function indexRepo(repoRoot: string): Promise<IndexResult> {
 
   // walked = files actually in the index; pack passes add their own as discovered
   const walked = new Set(store.allNodes().filter((n) => n.kind === "File").map((n) => n.filePath));
-  const { metrics: packMetrics } = await runPackPasses(repoRoot, store, walked);
+  const { metrics: packMetrics, notes } = await runPackPasses(repoRoot, store, walked);
+  result.notes = notes;
 
   for (const [language, lang] of Object.entries(packMetrics)) {
     result.metrics.languages[language] = lang;

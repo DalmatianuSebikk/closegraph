@@ -249,6 +249,9 @@ async function loadGraph(): Promise<LoadedGraph> {
     .map(([language, m]) => `${language}: ${m.files} files, ${m.resolved}/${m.callSites} call sites resolved`)
     .join("; ");
   if (packLine !== "") console.log(`language packs: ${packLine}`);
+  // one indented line per degradation note — a skipped/failed pack is visible,
+  // never a silently missing language (final review Important 1)
+  for (const note of result.notes) console.log(`  ${note}`);
   if (snapshotPath !== undefined) {
     writeAtomic(snapshotPath, JSON.stringify(takeSnapshot(result.store, repoPath, currentGitHead()), null, 2));
     console.log(`[closegraph] snapshot written to ${snapshotPath}`);

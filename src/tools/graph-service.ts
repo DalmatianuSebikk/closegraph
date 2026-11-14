@@ -140,6 +140,9 @@ export function createGraphService(root: string, storage?: PluginStorage): Graph
       );
     }
     progress?.(`[closegraph] indexed ${result.metrics.files} files in ${result.metrics.durationMs}ms`);
+    // pack-degradation notes surface here too: a missing/corrupt grammar or a
+    // failed pack must never be a silently absent language (final review Important 1)
+    for (const note of result.notes) progress?.(`[closegraph] ${note}`);
     if (storage !== undefined) {
       try {
         await storage.set(SNAPSHOT_KEY, JSON.stringify(takeSnapshot(result.store, root, await currentGitHead(root))));
