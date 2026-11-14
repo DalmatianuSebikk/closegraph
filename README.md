@@ -68,7 +68,7 @@ bun run src/cli.ts <repo> hook uninstall
 
 `!!!` high · `!` medium · unmarked low. Based on **entry-point reach** and
 fan-in — explainable in one line, no ML. Real vulnerability *rules* (dangerous
-sinks, `eval`, SQL concat, missing await…) are **Plan 4** — the schema already
+sinks, `eval`, SQL concat, missing await…) are **Plan 6** — the schema already
 has Finding nodes waiting.
 
 ## Status
@@ -77,7 +77,8 @@ has Finding nodes waiting.
 - ✅ Plan 2 — agent tools
 - ✅ Plan 3 — TUI graph view
 - ✅ Plan 4 — agent experience (batch query, report tool, steering, export + hook)
-- 🔜 Plan 5 — deterministic rules layer (Finding nodes + reachability)
+- 🔜 Plan 5 — language packs (Python, PHP, bash; Go/C++/Rust to follow)
+- 🔜 Plan 6 — deterministic rules layer (Finding nodes + reachability)
 - 🔮 Later — black-box attack-surface mode (endpoints/params as graph nodes)
 
 MIT. Bun + pure-JS deps only (ts-morph, OpenTUI, solid-js).

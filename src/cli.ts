@@ -109,16 +109,23 @@ if (hookMode) {
     // review I1): if nothing ignores it, exclude it locally — never edit .gitignore
     if (!snapshotIgnored(repoPath, snapshotOut)) {
       const exclude = join(repoPath, ".git", "info", "exclude");
-      try {
-        mkdirSync(dirname(exclude), { recursive: true });
-        appendFileSync(exclude, `\n# closegraph post-commit hook artifact\n${basename(snapshotOut)}\n`);
-        console.log(
-          `[closegraph] ${basename(snapshotOut)} is not git-ignored — added it to .git/info/exclude (local only; your worktree stays clean)`,
-        );
-      } catch {
-        console.error(
-          `[closegraph] warning: ${basename(snapshotOut)} is not git-ignored and .git/info/exclude is not writable — add it to your .gitignore or it will show as untracked`,
-        );
+      // a reinstall after uninstall finds the previous entry still there (uninstall
+      // never touches .git/info/exclude) — skip the append when the exact block +
+      // basename is already present instead of appending a duplicate
+      const block = `# closegraph post-commit hook artifact\n${basename(snapshotOut)}`;
+      const alreadyExcluded = existsSync(exclude) && readFileSync(exclude, "utf8").includes(block);
+      if (!alreadyExcluded) {
+        try {
+          mkdirSync(dirname(exclude), { recursive: true });
+          appendFileSync(exclude, `\n${block}\n`);
+          console.log(
+            `[closegraph] ${basename(snapshotOut)} is not git-ignored — added it to .git/info/exclude (local only; your worktree stays clean)`,
+          );
+        } catch {
+          console.error(
+            `[closegraph] warning: ${basename(snapshotOut)} is not git-ignored and .git/info/exclude is not writable — add it to your .gitignore or it will show as untracked`,
+          );
+        }
       }
     }
     process.exit(0);
@@ -170,14 +177,20 @@ function writeAtomic(path: string, contents: string): void {
 }
 
 /** True when git already ignores the path: `git check-ignore -q`, with a simple
- *  .gitignore-glob scan as the fallback for check-ignore failures (final review I1). */
+ *  .gitignore-glob scan as the fallback for check-ignore failures (final review I1).
+ *  When git is absent from PATH, Bun.spawnSync THROWS ("Executable not found in
+ *  $PATH") instead of returning an exit code — caught here so the glob scan answers. */
 function snapshotIgnored(repo: string, path: string): boolean {
-  const check = Bun.spawnSync(["git", "check-ignore", "-q", "--", path], {
-    cwd: repo,
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  if (check.exitCode === 0) return true;
+  try {
+    const check = Bun.spawnSync(["git", "check-ignore", "-q", "--", path], {
+      cwd: repo,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    if (check.exitCode === 0) return true;
+  } catch {
+    // no git in PATH — fall through to the .gitignore glob scan below
+  }
   const gitignore = join(repo, ".gitignore");
   if (!existsSync(gitignore)) return false;
   const base = basename(path);
