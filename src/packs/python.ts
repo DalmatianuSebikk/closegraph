@@ -325,14 +325,10 @@ class Extractor {
           // one dot = the file's own package dir; each extra dot climbs one more level
           const base = (dots === 1 ? fileDir : fileDir.slice(0, -(dots - 1)));
           if (moduleNode !== undefined) {
-            let segments = this.dottedSegments(moduleNode) ?? [];
-            // `from ..pkg.mod import b` from pkg/sub/: the first segment typically
-            // NAMES the climbed-to package — collapse it when it matches; otherwise
-            // keep the blind join (real-python resolution)
-            if (dots >= 2 && segments.length > 0 && base.length > 0 && segments[0] === base[base.length - 1]) {
-              segments = segments.slice(1);
-            }
-            addCandidates(segments, base.join("/"));
+            // CPython `_resolve_name` semantics: the climbed base joins the
+            // post-dots text VERBATIM — no name merging, echo included
+            // (`from ..pkg.mod` from pkg/sub/ really is pkg.pkg.mod).
+            addCandidates(this.dottedSegments(moduleNode) ?? [], base.join("/"));
           } else {
             // `from . import c`: the package's own init (the name's sibling module
             // is added in the binding loop below)
