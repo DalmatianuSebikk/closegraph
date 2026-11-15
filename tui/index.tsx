@@ -1,4 +1,5 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
+import { TextAttributes } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createSignal, onMount } from "solid-js"
 import { createFileMapModel, RISK_SHADING, type FileMapState } from "../src/view/file-map-model.js"
@@ -6,6 +7,17 @@ import { createSymbolViewModel, SYMBOL_VIEW_KEYMAP, type SymbolViewState } from 
 import { createDetailModel, DETAIL_KEYMAP, type DetailState } from "../src/view/detail-model.js"
 import { createEgoModel, EGO_KEYMAP, type EgoState } from "../src/view/ego-model.js"
 import { createPaletteModel, PALETTE_KEYMAP, type PaletteState } from "../src/view/palette-model.js"
+import {
+  createIdeModel,
+  IDE_KEYMAP,
+  SIDEBAR_W,
+  INSPECTOR_W,
+  HEADER_ROWS,
+  COMMAND_ROWS,
+  type IdeState,
+} from "../src/view/ide-model.js"
+import { IDE_THEME } from "../src/view/ide-theme.js"
+import { toSegments, type IdeSegment } from "../src/view/ide-layout.js"
 import type {
   FilesPayload,
   FileSymbolsPayload,
@@ -31,6 +43,13 @@ import type {
  *
  * The host (opencode ≥2.2.x) applies the Solid transform to this file (Task 4 verified
  * in-host) — do NOT register ensureSolidTransformPlugin() here.
+ *
+ * codegraph-ide-screen plan Task 4: the `codegraph` route (CodegraphIdeRoute) renders
+ * the pixel-accurate IDE screen from src/view/ide-model.ts — header/sidebar/canvas/
+ * inspector/command bar — as an INDEPENDENT full-screen route (it does not join the
+ * Screen union above). Additive: the `graph` route + `closegraph.open` command are
+ * untouched. Bold/underline segments ride the `attributes` bitmask prop (TextOptions
+ * has no bold/underline boolean props in @opentui/solid 0.8.x).
  */
 
 /** One rpc bridge helper: thrown bridge errors become the typed unavailable payload.
@@ -114,6 +133,13 @@ const BANNER_FG: Record<"none" | "unknown-freshness" | "unavailable", string | u
   "unknown-freshness": "yellow",
   unavailable: "red",
 }
+
+/** Shared banner row (both routes): blank when kind is none, colored text otherwise. */
+const bannerLine = (banner: { kind: "none" | "unknown-freshness" | "unavailable"; text: string }) => (
+  <text width="100%" height={1} flexShrink={0} fg={BANNER_FG[banner.kind]}>
+    {banner.kind === "none" ? " " : banner.text}
+  </text>
+)
 
 /** marker string → bucket: the EXACT inverse of RISK_SHADING. An unmapped marker
  *  (e.g. a future "!!") renders unmarked with a ONE-TIME dev warning — never a render crash. */
@@ -652,12 +678,6 @@ function CodeGraphRoute() {
     if (picked !== undefined) pushDetail(picked)
   }
 
-  const bannerLine = (banner: { kind: "none" | "unknown-freshness" | "unavailable"; text: string }) => (
-    <text width="100%" height={1} flexShrink={0} fg={BANNER_FG[banner.kind]}>
-      {banner.kind === "none" ? " " : banner.text}
-    </text>
-  )
-
   const MapView = () => (
     <box flexDirection="column" width="100%" height="100%" paddingTop={0} paddingLeft={1} paddingRight={1}>
       <text width="100%" height={1} flexShrink={0} fg="cyan">
@@ -854,6 +874,437 @@ function CodeGraphRoute() {
   )
 }
 
+/** Basename of a directory path (trailing-slash tolerant); undefined stays undefined. */
+function basenameOf(directory: string | undefined): string | undefined {
+  if (directory === undefined) return undefined
+  const trimmed = directory.length > 1 && directory.endsWith("/") ? directory.slice(0, -1) : directory
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1)
+}
+
+/** bold/underline segment flags → the attributes bitmask prop (TextOptions has no
+ *  boolean bold/underline props); undefined when neither is set. */
+function segmentAttributes(seg: IdeSegment): number | undefined {
+  const bits = (seg.bold === true ? TextAttributes.BOLD : 0) | (seg.underline === true ? TextAttributes.UNDERLINE : 0)
+  return bits === 0 ? undefined : bits
+}
+
+/**
+ * The `codegraph` IDE route (codegraph-ide-screen plan Task 4). Independent of the
+ * Screen union: it owns its own createIdeModel + signal + sync and its own single
+ * useKeyboard (precedence: palette overlay → help overlay → IDE model dispatch).
+ * `/` opens the existing palette overlay — a pick re-centers the IDE model;
+ * esc ⇒ quitDestination (the same d.ts-pinned shapes the graph route quits with).
+ * The model's selectedRef may be a synthetic `+more:*`/`+collapsed:*` placeholder —
+ * those are NEVER passed to rpc or re-centered: canvas clicks go through
+ * model.selectByRef (the model guards open()), and re-centers only ever carry
+ * palette picks or inspector caller/callee refs (both real graph refs).
+ */
+function CodegraphIdeRoute(props: { initialRef?: string }) {
+  const context = usePlugin()
+  // same root rule as the graph route: this TUI's directory rides every rpc call
+  const sessionRoot = context.location?.directory ?? ""
+  const repoBase = basenameOf(context.location?.directory)
+  const palette = createPaletteModel({ search: paletteSearchViaRpc(context.client, sessionRoot) })
+  const [paletteState, setPaletteState] = createSignal<PaletteState>(palette.state())
+  const dims = useTerminalDimensions()
+
+  const makeModel = (ref: string) =>
+    createIdeModel({
+      ref,
+      egoGraph: egoGraphViaRpc(context.client, sessionRoot),
+      nodeDetail: nodeDetailViaRpc(context.client, sessionRoot),
+      egoSource: egoSourceViaRpc(context.client, sessionRoot),
+    })
+
+  const [model, setModel] = createSignal(makeModel(props.initialRef ?? ""))
+  const [ideState, setIdeState] = createSignal<IdeState>(model().state())
+  const sync = () => setIdeState(model().state())
+  const syncPalette = () => setPaletteState(palette.state())
+
+  onMount(() => {
+    const d = dims()
+    model().resize({ width: d.width, height: d.height })
+    void model().load().then(sync, sync)
+  })
+
+  // terminal resize re-windows the model without refetches (Review Focus 2 pattern)
+  createEffect(() => {
+    const d = dims()
+    model().resize({ width: d.width, height: d.height })
+    sync()
+  })
+
+  /** Palette pick / inspector caller-callee click: re-center on ANY graph ref. The
+   *  Task-3 model exports no recenter() and selectByRef only hits drawn cards, so a
+   *  fresh model over the picked ref is the route-level re-center path (center
+   *  history resets — the same shape as opening the route with a ref argument). */
+  function recenterIde(ref: string): void {
+    const next = makeModel(ref)
+    const d = dims()
+    next.resize({ width: d.width, height: d.height })
+    setModel(() => next)
+    sync()
+    void next.load().then(sync, sync)
+  }
+
+  /** EGO_SETTLE_MS family: fire-and-forget re-centers/detail loads land async; a
+   *  short settle timer repaints, driving the model's lazy inspector detail via
+   *  detailDirty() → loadDetail() (which dedupes onto any in-flight fetch). */
+  const settleIde = () => {
+    setTimeout(() => {
+      const m = model()
+      if (m.detailDirty()) void m.loadDetail().then(sync, sync)
+      else sync()
+    }, EGO_SETTLE_MS)
+  }
+
+  function openPalette(): void {
+    void palette.open().then(syncPalette, syncPalette)
+  }
+
+  useKeyboard((key) => {
+    // palette overlay first (same branch shape as the graph route; a pick re-centers
+    // the IDE model instead of pushing a detail screen)
+    if (palette.state().open) {
+      switch (actionFor(PALETTE_KEYMAP, key)) {
+        case "up":
+          key.preventDefault()
+          palette.move(-1)
+          syncPalette()
+          break
+        case "down":
+          key.preventDefault()
+          palette.move(1)
+          syncPalette()
+          break
+        case "select": {
+          key.preventDefault()
+          const picked = palette.select()
+          syncPalette()
+          if (picked !== undefined) recenterIde(picked)
+          break
+        }
+        case "close":
+          key.preventDefault()
+          palette.close()
+          syncPalette()
+          break
+        case "backspace":
+          key.preventDefault()
+          void palette.backspace().then(syncPalette, syncPalette)
+          break
+        default: {
+          const typed = printable(key)
+          if (typed !== undefined) {
+            key.preventDefault()
+            void palette.type(typed).then(syncPalette, syncPalette)
+          }
+          break
+        }
+      }
+      return
+    }
+
+    // help overlay second: while open, every key is swallowed except ? / esc, which
+    // close it (palette-pattern overlays never leak printables into navigation)
+    if (ideState().help !== undefined) {
+      key.preventDefault()
+      const action = actionFor(IDE_KEYMAP, key)
+      if (action === "help" || action === "back") {
+        model().dispatch("help") // help toggles closed
+        sync()
+      }
+      return
+    }
+
+    // IDE model dispatch: IDE_KEYMAP IS the dispatch table (actionFor parity)
+    const action = actionFor(IDE_KEYMAP, key)
+    switch (action) {
+      case undefined:
+        break
+      case "back":
+        key.preventDefault()
+        // esc quits the SCREEN (the model's back action is a deliberate no-op):
+        // newest root session in this project, else the home route
+        context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
+        break
+      case "search":
+        key.preventDefault()
+        openPalette() // the model's search action is a no-op — the route owns it
+        break
+      case "command3": {
+        key.preventDefault()
+        model().dispatch("command3") // lastCommand=3 → the command-bar chrome lights up
+        sync()
+        const prompt = model().askAgentPrompt()
+        if (prompt !== undefined) void runAskAgent(context, prompt)
+        break
+      }
+      default: {
+        key.preventDefault()
+        const m = model()
+        m.dispatch(action)
+        sync()
+        settleIde() // re-centers/selection changes load async — repaint when they land
+        break
+      }
+    }
+  })
+
+  // click parity on the canvas: selectByRef owns select + click-on-selected ⇒ open;
+  // a click-triggered re-center loads async, so the settle timer repaints it
+  const clickSegment = (ref: string) => {
+    model().selectByRef(ref)
+    sync()
+    settleIde()
+  }
+
+  /** One canvas/minimap row: width-pinned height-1 segments (E7 verbatim; E3: the
+   *  layout pads/truncates so a segment's text length IS its width). Mouse handlers
+   *  only on segments carrying a ref. */
+  const SegmentRow = (rowProps: { row: IdeSegment[] }) => (
+    <box flexDirection="row" height={1} flexShrink={0}>
+      {...rowProps.row.map((seg) => (
+        <text
+          width={seg.text.length}
+          height={1}
+          fg={seg.fg}
+          bg={seg.bg}
+          attributes={segmentAttributes(seg)}
+          onMouseDown={seg.ref !== undefined ? () => clickSegment(seg.ref!) : undefined}
+        >
+          {seg.text}
+        </text>
+      ))}
+    </box>
+  )
+
+  /** D4: panel separators are CHARACTER columns (│), never border* props. */
+  const Separator = () => (
+    <box flexDirection="column" width={1} flexShrink={0}>
+      {...Array.from({ length: Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS) }, () => (
+        <text width={1} height={1} flexShrink={0} fg={IDE_THEME.borderSubtle}>
+          │
+        </text>
+      ))}
+    </box>
+  )
+
+  const headerRepoLabel = (s: IdeState): string => {
+    if (repoBase === undefined) return s.header.repoLabel
+    return s.header.repoLabel === "" ? repoBase : `${repoBase} · ${s.header.repoLabel}`
+  }
+
+  const IdePaletteOverlay = () => (
+    <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
+      <text width="100%" height={1} flexShrink={0} fg="cyan">
+        {`jump to symbol: ${paletteState().filter}${paletteState().source === "snapshot" ? " (snapshot)" : ""}`}
+      </text>
+      {bannerLine(paletteState().banner)}
+      <box flexDirection="column" paddingTop={0} flexGrow={1}>
+        {...paletteState().rows.map((row, i) => (
+          <box
+            flexDirection="row"
+            height={1}
+            flexShrink={0}
+            backgroundColor={row.selected ? "gray" : undefined}
+            onMouseDown={() => {
+              const s = paletteState()
+              palette.move(i - s.cursor)
+              const picked = palette.select()
+              syncPalette()
+              if (picked !== undefined) recenterIde(picked)
+            }}
+          >
+            <text width={3} height={1} flexShrink={0} fg={row.selected ? "black" : undefined}>
+              {row.selected ? "›" : " "}
+            </text>
+            <text height={1} flexShrink={0} fg={row.selected ? "black" : undefined}>
+              {`${row.ref}  (${row.kind})`}
+            </text>
+          </box>
+        ))}
+      </box>
+      <text width="100%" height={1} flexShrink={0} fg="gray">
+        {"type to filter · ↑/↓ move · enter recenter · esc or ctrl-c close"}
+      </text>
+    </box>
+  )
+
+  const IdeHelpOverlay = (helpProps: { lines: string[] }) => (
+    <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
+      <text width="100%" height={1} flexShrink={0} fg="cyan">
+        {helpProps.lines[0] ?? "help"}
+      </text>
+      <box flexDirection="column" paddingTop={0} flexGrow={1}>
+        {...helpProps.lines.slice(1).map((line) => (
+          <text width="100%" height={1} flexShrink={0}>
+            {line === "" ? " " : line}
+          </text>
+        ))}
+      </box>
+      <text width="100%" height={1} flexShrink={0} fg="gray">
+        {"? or esc close"}
+      </text>
+    </box>
+  )
+
+  const HeaderView = (headerProps: { s: IdeState }) => (
+    <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
+      <box flexDirection="row" height={1} flexShrink={0}>
+        <text height={1} attributes={TextAttributes.BOLD} fg={IDE_THEME.cyan}>
+          {` ${headerProps.s.header.breadcrumb}`}
+        </text>
+        <text height={1} fg={IDE_THEME.textMuted}>
+          {headerRepoLabel(headerProps.s) === "" ? "" : `  ${headerRepoLabel(headerProps.s)}`}
+        </text>
+        <box flexGrow={1} height={1} />
+        {/* the banner folds into the header's status slot (bannerLine semantics:
+            blank when none) — the model's row budget has no fourth header row */}
+        <text height={1} fg={headerProps.s.banner.kind === "none" ? IDE_THEME.textMuted : BANNER_FG[headerProps.s.banner.kind]}>
+          {headerProps.s.banner.kind === "none" ? `${headerProps.s.header.status} ` : `${headerProps.s.banner.text} `}
+        </text>
+      </box>
+      <box flexDirection="row" height={1} flexShrink={0}>
+        {...headerProps.s.header.tabs.map((tab) => (
+          <text height={1} fg={tab.active ? "black" : IDE_THEME.textMuted} bg={tab.active ? IDE_THEME.cyan : undefined}>
+            {` ${tab.label} `}
+          </text>
+        ))}
+        <box flexGrow={1} height={1} />
+        <text height={1} fg={IDE_THEME.textMuted}>
+          {`${headerProps.s.header.stats} `}
+        </text>
+      </box>
+      <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.borderSubtle}>
+        {"─".repeat(Math.max(1, dims().width))}
+      </text>
+    </box>
+  )
+
+  const SidebarView = (sideProps: { sidebar: NonNullable<IdeState["sidebar"]> }) => (
+    <box flexDirection="column" width={SIDEBAR_W} flexShrink={0} backgroundColor={IDE_THEME.panel}>
+      {/* lines + minimap share the body height: the minimap keeps its rows and the
+          lines take the rest (D1 model windowing — no scrollbox) */}
+      {(() => {
+        const minimapRows = toSegments(sideProps.sidebar.minimap, sideProps.sidebar.minimap[0]?.length ?? 0)
+        const budget = Math.max(0, Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS) - minimapRows.length)
+        return [
+          ...sideProps.sidebar.lines.slice(0, budget).map((line) => (
+            <text width="100%" height={1} flexShrink={0} fg={line.fg}>
+              {line.text === "" ? " " : line.text}
+            </text>
+          )),
+          ...minimapRows.map((row) => <SegmentRow row={row} />),
+        ]
+      })()}
+    </box>
+  )
+
+  const InspectorView = (inspProps: { inspector: NonNullable<IdeState["inspector"]>; overlay: boolean }) => (
+    <box
+      flexDirection="column"
+      width={inspProps.overlay ? undefined : INSPECTOR_W}
+      flexGrow={inspProps.overlay ? 1 : undefined}
+      flexShrink={0}
+      backgroundColor={IDE_THEME.panel}
+    >
+      {/* flattened sections (title fg cyan + lines), windowed by the model's scroll
+          offset over its vh height — caller/callee lines carry refs and re-center */}
+      {(() => {
+        const rows: ({ title: true; text: string } | { title?: false; text: string; fg?: string; ref?: string })[] = []
+        for (const sec of inspProps.inspector.sections) {
+          rows.push({ title: true, text: sec.title })
+          for (const line of sec.lines) rows.push(line)
+        }
+        return rows.slice(inspProps.inspector.scroll, inspProps.inspector.scroll + inspProps.inspector.height).map((line) => (
+          <text
+            width="100%"
+            height={1}
+            flexShrink={0}
+            fg={line.title === true ? IDE_THEME.cyan : line.fg}
+            onMouseDown={line.title !== true && line.ref !== undefined ? () => recenterIde(line.ref!) : undefined}
+          >
+            {line.text === "" ? " " : line.text}
+          </text>
+        ))
+      })()}
+    </box>
+  )
+
+  const CommandBar = (barProps: { s: IdeState }) => (
+    <box flexDirection="column" height={COMMAND_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
+      <box flexDirection="row" height={1} flexShrink={0}>
+        {...barProps.s.commandBar.actions.map((a) => (
+          <text height={1} flexShrink={0} width={a.label.length + 5} fg={a.active ? "black" : IDE_THEME.text} bg={a.active ? IDE_THEME.cyan : undefined}>
+            {`  ${a.key} ${a.label} `}
+          </text>
+        ))}
+      </box>
+      <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.amber}>
+        {barProps.s.commandBar.note ?? " "}
+      </text>
+      <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+        {" h/l columns · j/k move · enter recenter · space collapse · / search · ? help · esc back"}
+      </text>
+    </box>
+  )
+
+  // Signals are read INSIDE JSX expressions so every branch re-renders (D2/D3); the
+  // view choice is ONE opaque IIFE — the transform decomposes bare nested ternaries.
+  return (
+    <box flexDirection="column" width="100%" height="100%" backgroundColor={IDE_THEME.background}>
+      {(() => {
+        if (paletteState().open) return <IdePaletteOverlay />
+        const s = ideState()
+        if (s.help !== undefined) return <IdeHelpOverlay lines={s.help} />
+        // compact/no-panels inspector overlay ⇒ the inspector REPLACES the canvas
+        // (the model's panelLayout doc ruling) instead of splitting a <40-col viewport
+        const overlayInspector = s.inspector !== undefined && (s.mode === "no-panels" || s.mode === "compact")
+        return (
+          <>
+            <HeaderView s={s} />
+            <box flexDirection="row" flexGrow={1}>
+              {s.sidebar !== undefined ? (
+                <>
+                  <SidebarView sidebar={s.sidebar} />
+                  <Separator />
+                </>
+              ) : (
+                []
+              )}
+              {overlayInspector ? (
+                <InspectorView inspector={s.inspector!} overlay={true} />
+              ) : s.screen === "miss" ? (
+                <box flexDirection="column" flexGrow={1}>
+                  {...(s.miss?.lines ?? []).map((line) => (
+                    <text width="100%" height={1} flexShrink={0} fg={line.muted === true ? IDE_THEME.textMuted : undefined}>
+                      {line.text === "" ? " " : line.text}
+                    </text>
+                  ))}
+                </box>
+              ) : (
+                <box flexDirection="column" flexGrow={1} backgroundColor={IDE_THEME.background}>
+                  {...(s.canvas?.rows ?? []).map((row) => <SegmentRow row={row} />)}
+                </box>
+              )}
+              {!overlayInspector && s.inspector !== undefined ? (
+                <>
+                  <Separator />
+                  <InspectorView inspector={s.inspector} overlay={false} />
+                </>
+              ) : (
+                []
+              )}
+            </box>
+            <CommandBar s={s} />
+          </>
+        )
+      })()}
+    </box>
+  )
+}
+
 export default Plugin.define({
   id: "closegraph.tui",
   setup(context) {
@@ -864,6 +1315,13 @@ export default Plugin.define({
     const unregisterRoute = context.ui.router.register({
       name: "graph",
       render: () => <CodeGraphRoute />,
+    })
+    // codegraph-ide-screen plan Task 4: the IDE screen is an ADDITIVE sibling page —
+    // the graph route above is untouched. An optional ref argument pre-selects the
+    // center (`/codegraph src/a.ts#f`).
+    const unregisterIde = context.ui.router.register({
+      name: "codegraph",
+      render: (input) => <CodegraphIdeRoute initialRef={typeof input.data?.ref === "string" ? input.data.ref : undefined} />,
     })
 
     context.keymap.layer(() => ({
@@ -877,11 +1335,21 @@ export default Plugin.define({
           slash: { name: "closegraph" },
           run: () => context.ui.router.navigate({ type: "plugin", name: "graph" }),
         },
+        {
+          id: "codegraph.open",
+          title: "Open CodeGraph IDE",
+          group: "CodeGraph",
+          palette: true,
+          slash: { name: "codegraph", arguments: true },
+          run: (input) =>
+            context.ui.router.navigate({ type: "plugin", name: "codegraph", data: input?.trim() ? { ref: input.trim() } : undefined }),
+        },
       ],
     }))
 
     return () => {
       unregisterRoute()
+      unregisterIde()
     }
   },
 })
