@@ -1,12 +1,18 @@
 /**
  * Ego-graph canvas layout (ego-graph-view plan Task 3): PURE fixed-geometry
- * composer — no OpenTUI imports, no dims input (the MODEL in ego-model.ts owns
- * windowing and the narrow-terminal collapse), no randomness, no clock. Same
- * input ⇒ same canvas byte-for-byte, so the render layer (Task 5) maps rows 1:1
- * onto height-1 `<text>` segments per the tui-render/ego-edges spikes.
+ * composer — no OpenTUI imports, no clock (the MODEL in ego-model.ts owns
+ * windowing and the narrow-terminal collapse). Same input ⇒ same canvas
+ * byte-for-byte, so the render layer (Task 5) maps rows 1:1 onto height-1
+ * `<text>` segments per the tui-render/ego-edges spikes.
  *
  * Geometry (spike E9 family, constants pinned by the plan):
- * - Canvas width is ALWAYS egoMinWidth() = 56: `[callers 16][gutter 4][center 16][gutter 4][callees 16]`.
+ * - ADAPTIVE WIDTH (readability iteration): boxes size to the terminal —
+ *   boxW = clamp(BOX_W, floor((terminalWidth − EGO_PAD − gutters) / 3), BOX_W_MAX).
+ *   At 80 cols that is 23 (21-char labels vs the old 13); the canvas is
+ *   3*boxW + 2*GUTTER_W and never wider than the padded terminal. `width` in the
+ *   input is the TERMINAL width; when omitted the layout draws the minimum
+ *   (BOX_W) canvas. The collapse floor stays egoMinWidth() = 56 plus the route's
+ *   EGO_PAD — the MODEL owns that check.
  * - Boxes are 4 rows (border, label, detail, border); side columns stack top-down
  *   in input order with one blank row between boxes (pitch BOX_H + 1). The center
  *   column is vertically centered against the tallest side column:
@@ -14,7 +20,8 @@
  * - Edge paths run from a neighbor's border mid-row (boxTop + 2) across the gutter
  *   into the arrow terminal beside the center's border. When the two mid-rows
  *   differ, the path bends in the gutter (┐/┘ at the anchor, │ between, └/┌ at
- *   the center row).
+ *   the center row). Columns derive from boxW; the stroke algebra is
+ *   width-agnostic (verified at 56 and 80/120 in tests).
  *
  * Collision policy (brief ruling, Ruling-12 family) reconciled with the spike's
  * stroke-union algebra (ego-edges.md E1):
@@ -33,14 +40,14 @@
  *
  * Text (spike E3): OpenTUI silently clips a <text> to its declared width, so this
  * module pads/truncates EVERY cell run itself — every segment's text length IS
- * its width, and every row's segments concatenate to exactly egoMinWidth().
+ * its width, and every row's segments concatenate to exactly the canvas width.
  */
 import type { RiskBucket } from "./risk.js";
 import { RISK_SHADING } from "./file-map-model.js";
 
 export interface EgoBox {
   ref: string;
-  /** line 1: node short name (truncated to fit BOX_W - 2, "…" convention) */
+  /** line 1: node short name (truncated to fit boxW - 2, "…" convention) */
   label: string;
   /** line 2: file path + counts, truncated the same way; may be "" */
   detail: string;
@@ -62,7 +69,7 @@ export interface EgoSegment {
 export interface EgoCanvas {
   /** one entry per canvas row; the render layer maps 1:1 to height-1 rows */
   rows: EgoSegment[][];
-  /** always egoMinWidth() — the canvas is fixed-geometry */
+  /** the fixed-geometry canvas width for the input's terminal width (≥ egoMinWidth()) */
   width: number;
   height: number;
   /** edges that could not be routed — disclosed, never silently missing */
@@ -76,18 +83,34 @@ export interface EgoLayoutInput {
   callees: EgoBox[];
   /** highlighted node — its box's interior segments get the selection bg */
   selectedRef?: string;
+  /** TERMINAL width (the model passes dims.width); omitted ⇒ the BOX_W minimum canvas. */
+  width?: number;
 }
 
-/** total box width incl. border columns (14-char interior) */
+/** minimum total box width incl. border columns (14-char interior) — also the default */
 export const BOX_W = 16;
+/** width cap (38-char interior) — past this the canvas stops growing */
+export const BOX_W_MAX = 40;
 /** border top, 2 label rows, border bottom */
 export const BOX_H = 4;
 /** connector lanes between columns (2 lanes) */
 export const GUTTER_W = 4;
+/** the route's paddingLeft + paddingRight — the canvas must fit inside them (frozen tui fact) */
+export const EGO_PAD = 2;
 
-/** 3 * BOX_W + 2 * GUTTER_W = 56 — the fixed canvas width and collapse threshold. */
+/** 3 * BOX_W + 2 * GUTTER_W = 56 — the narrowest canvas; collapse floor is this + EGO_PAD. */
 export function egoMinWidth(): number {
   return 3 * BOX_W + 2 * GUTTER_W;
+}
+
+/** Adaptive box width from the TERMINAL width: clamp(BOX_W, floor((w − pad − gutters) / 3), BOX_W_MAX). */
+export function egoBoxWidth(width: number): number {
+  return Math.max(BOX_W, Math.min(BOX_W_MAX, Math.floor((width - EGO_PAD - 2 * GUTTER_W) / 3)));
+}
+
+/** The canvas width a terminal of `width` columns gets (≤ width − EGO_PAD; remainder is slack). */
+export function egoCanvasWidth(width: number): number {
+  return 3 * egoBoxWidth(width) + 2 * GUTTER_W;
 }
 
 // --- stroke-union glyph algebra (spike E1: 4-bit arm masks) ---
@@ -113,17 +136,37 @@ const GLYPHS: Record<number, string> = {
   [U | D | L | R]: "┼",
 };
 
-/** Column x origins. */
-const LEFT_X = 0;
-const CENTER_X = BOX_W + GUTTER_W;
-const RIGHT_X = 2 * (BOX_W + GUTTER_W);
-/** Lane columns: lane 1 hugs the neighbor boxes, lane 2 is one char further from them. */
-const LEFT_LANE1 = LEFT_X + BOX_W;
-const LEFT_LANE2 = LEFT_LANE1 + 1;
-const LEFT_ARROW = LEFT_LANE1 + GUTTER_W - 1; // adjacent to the center's left border
-const RIGHT_LANE1 = RIGHT_X - 1;
-const RIGHT_LANE2 = RIGHT_LANE1 - 1;
-const RIGHT_ARROW = CENTER_X + BOX_W; // adjacent to the center's right border
+/** Per-layout geometry: every column derives from the computed box width. */
+interface Geometry {
+  boxW: number;
+  canvasW: number;
+  centerX: number;
+  rightX: number;
+  /** lane 1 hugs the neighbor boxes, lane 2 is one char further from them */
+  leftLane1: number;
+  leftLane2: number;
+  leftArrow: number;
+  rightLane1: number;
+  rightLane2: number;
+  rightArrow: number;
+}
+
+function geometryFor(boxW: number): Geometry {
+  const centerX = boxW + GUTTER_W;
+  const rightX = 2 * (boxW + GUTTER_W);
+  return {
+    boxW,
+    canvasW: 3 * boxW + 2 * GUTTER_W,
+    centerX,
+    rightX,
+    leftLane1: boxW,
+    leftLane2: boxW + 1,
+    leftArrow: boxW + GUTTER_W - 1, // adjacent to the center's left border
+    rightLane1: rightX - 1,
+    rightLane2: rightX - 2,
+    rightArrow: centerX + boxW, // adjacent to the center's right border
+  };
+}
 
 interface Stroke {
   row: number;
@@ -141,35 +184,37 @@ function columnHeight(n: number): number {
 }
 
 /** All strokes of one edge path on `side`, routed through `lane`. */
-function edgePath(anchor: number, mid: number, lane: 1 | 2, side: "left" | "right"): Stroke[] {
+function edgePath(geo: Geometry, anchor: number, mid: number, lane: 1 | 2, side: "left" | "right"): Stroke[] {
   const horiz = L | R;
   if (side === "left") {
     if (anchor === mid) {
-      return [stroke(mid, LEFT_LANE1, horiz), stroke(mid, LEFT_LANE1 + 1, horiz), stroke(mid, LEFT_ARROW - 1, horiz)];
+      const path: Stroke[] = [];
+      for (let col = geo.leftLane1; col < geo.leftArrow; col++) path.push(stroke(mid, col, horiz));
+      return path;
     }
-    const col = lane === 1 ? LEFT_LANE1 : LEFT_LANE2;
+    const col = lane === 1 ? geo.leftLane1 : geo.leftLane2;
     const down = anchor < mid;
     const path: Stroke[] = [];
-    if (lane === 2) path.push(stroke(anchor, LEFT_LANE1, horiz)); // entry across lane 1
+    if (lane === 2) path.push(stroke(anchor, geo.leftLane1, horiz)); // entry across lane 1
     path.push(stroke(anchor, col, down ? L | D : L | U));
     for (let row = Math.min(anchor, mid) + 1; row < Math.max(anchor, mid); row++) path.push(stroke(row, col, U | D));
     path.push(stroke(mid, col, down ? U | R : D | R));
-    if (col + 1 <= LEFT_ARROW - 1) path.push(stroke(mid, col + 1, horiz));
-    if (col + 2 <= LEFT_ARROW - 1) path.push(stroke(mid, col + 2, horiz));
+    for (let c = col + 1; c < geo.leftArrow; c++) path.push(stroke(mid, c, horiz));
     return path;
   }
   if (anchor === mid) {
-    return [stroke(mid, RIGHT_LANE1, horiz), stroke(mid, RIGHT_LANE1 - 1, horiz), stroke(mid, RIGHT_ARROW + 1, horiz)];
+    const path: Stroke[] = [];
+    for (let col = geo.rightLane1; col > geo.rightArrow; col--) path.push(stroke(mid, col, horiz));
+    return path;
   }
-  const col = lane === 1 ? RIGHT_LANE1 : RIGHT_LANE2;
+  const col = lane === 1 ? geo.rightLane1 : geo.rightLane2;
   const down = anchor < mid;
   const path: Stroke[] = [];
-  if (lane === 2) path.push(stroke(anchor, RIGHT_LANE1, horiz)); // entry across lane 1
+  if (lane === 2) path.push(stroke(anchor, geo.rightLane1, horiz)); // entry across lane 1
   path.push(stroke(anchor, col, down ? R | D : R | U));
   for (let row = Math.min(anchor, mid) + 1; row < Math.max(anchor, mid); row++) path.push(stroke(row, col, U | D));
   path.push(stroke(mid, col, down ? U | L : D | L));
-  if (col - 1 >= RIGHT_ARROW + 1) path.push(stroke(mid, col - 1, horiz));
-  if (col - 2 >= RIGHT_ARROW + 1) path.push(stroke(mid, col - 2, horiz));
+  for (let c = col - 1; c > geo.rightArrow; c--) path.push(stroke(mid, c, horiz));
   return path;
 }
 
@@ -188,7 +233,8 @@ function fit(textValue: string, width: number): string {
   return textValue.length > width ? textValue.slice(0, width - 1) + "…" : textValue.padEnd(width);
 }
 
-function paintBox(cells: (Cell | undefined)[][], box: EgoBox, top: number, left: number, selected: boolean, id: number): void {
+function paintBox(geo: Geometry, cells: (Cell | undefined)[][], box: EgoBox, top: number, left: number, selected: boolean, id: number): void {
+  const boxW = geo.boxW;
   const borderGroup = id * 2;
   const interiorGroup = id * 2 + 1;
   const border = (textValue: string): Cell => ({ text: textValue, ref: box.ref, group: borderGroup });
@@ -207,41 +253,41 @@ function paintBox(cells: (Cell | undefined)[][], box: EgoBox, top: number, left:
     group: interiorGroup,
   });
 
-  const labelLine = fit(box.marker + box.label, BOX_W - 2);
+  const labelLine = fit(box.marker + box.label, boxW - 2);
   const markerRun = box.marker === "" ? "" : labelLine.slice(0, box.marker.length);
   const labelRun = labelLine.slice(markerRun.length);
 
   const row = top;
   cells[row][left] = border("┌");
-  for (let i = 1; i < BOX_W - 1; i++) cells[row][left + i] = border("─");
-  cells[row][left + BOX_W - 1] = border("┐");
+  for (let i = 1; i < boxW - 1; i++) cells[row][left + i] = border("─");
+  cells[row][left + boxW - 1] = border("┐");
 
   cells[row + 1][left] = border("│");
   let x = left + 1;
   for (const char of markerRun) cells[row + 1][x++] = { text: char, fg: "red", ...(bg !== undefined ? { bg } : {}), ref: box.ref, group: interiorGroup };
   for (const char of labelRun) cells[row + 1][x++] = interior(char);
-  cells[row + 1][left + BOX_W - 1] = border("│");
+  cells[row + 1][left + boxW - 1] = border("│");
 
   cells[row + 2][left] = border("│");
   x = left + 1;
-  for (const char of fit(box.detail, BOX_W - 2)) cells[row + 2][x++] = interior(char);
-  cells[row + 2][left + BOX_W - 1] = border("│");
+  for (const char of fit(box.detail, boxW - 2)) cells[row + 2][x++] = interior(char);
+  cells[row + 2][left + boxW - 1] = border("│");
 
   cells[row + 3][left] = border("└");
-  for (let i = 1; i < BOX_W - 1; i++) cells[row + 3][left + i] = border("─");
-  cells[row + 3][left + BOX_W - 1] = border("┘");
+  for (let i = 1; i < boxW - 1; i++) cells[row + 3][left + i] = border("─");
+  cells[row + 3][left + boxW - 1] = border("┘");
 }
 
 /** Route every neighbor edge of one side; returns the count of dropped edges. */
-function routeSide(neighbors: EgoBox[], mid: number, side: "left" | "right"): { grid: Map<number, number>; undrawn: number } {
+function routeSide(geo: Geometry, neighbors: EgoBox[], mid: number, side: "left" | "right"): { grid: Map<number, number>; undrawn: number } {
   const grid = new Map<number, number>();
-  const width = egoMinWidth();
+  const width = geo.canvasW;
   let undrawn = 0;
   for (let i = 0; i < neighbors.length; i++) {
     const anchor = i * (BOX_H + 1) + 2; // border mid-row = boxTop + 2 (the detail row)
     let placed = false;
     for (const lane of [1, 2] as const) {
-      const path = edgePath(anchor, mid, lane, side);
+      const path = edgePath(geo, anchor, mid, lane, side);
       const blocked = path.some((s) => {
         const existing = grid.get(s.row * width + s.col);
         return existing !== undefined && isVerticalOnly(existing) && isVerticalOnly(s.arms);
@@ -277,28 +323,29 @@ function toSegments(cells: (Cell | undefined)[]): EgoSegment[] {
 }
 
 export function egoLayout(input: EgoLayoutInput): EgoCanvas {
-  const width = egoMinWidth();
+  const geo = geometryFor(input.width === undefined ? BOX_W : egoBoxWidth(input.width));
+  const width = geo.canvasW;
   const tallest = Math.max(columnHeight(input.callers.length), columnHeight(input.callees.length));
   const centerY = Math.min(Math.floor(tallest / 2), Math.max(0, tallest - BOX_H));
   const mid = centerY + 2; // the center box's border mid-row
   const height = Math.max(tallest, centerY + BOX_H);
 
-  const left = routeSide(input.callers, mid, "left");
-  const right = routeSide(input.callees, mid, "right");
+  const left = routeSide(geo, input.callers, mid, "left");
+  const right = routeSide(geo, input.callees, mid, "right");
   const undrawnEdges = left.undrawn + right.undrawn;
 
   const cells: (Cell | undefined)[][] = Array.from({ length: height }, () => Array<Cell | undefined>(width).fill(undefined));
 
   let boxId = 0;
-  input.callers.forEach((b, i) => paintBox(cells, b, i * (BOX_H + 1), LEFT_X, b.ref === input.selectedRef, boxId++));
-  input.callees.forEach((b, i) => paintBox(cells, b, i * (BOX_H + 1), RIGHT_X, b.ref === input.selectedRef, boxId++));
-  paintBox(cells, input.center, centerY, CENTER_X, input.center.ref === input.selectedRef, boxId++);
+  input.callers.forEach((b, i) => paintBox(geo, cells, b, i * (BOX_H + 1), 0, b.ref === input.selectedRef, boxId++));
+  input.callees.forEach((b, i) => paintBox(geo, cells, b, i * (BOX_H + 1), geo.rightX, b.ref === input.selectedRef, boxId++));
+  paintBox(geo, cells, input.center, centerY, geo.centerX, input.center.ref === input.selectedRef, boxId++);
 
   for (const [key, arms] of left.grid) cells[Math.floor(key / width)][key % width] = { text: GLYPHS[arms] ?? "·", fg: "gray" };
   for (const [key, arms] of right.grid) cells[Math.floor(key / width)][key % width] = { text: GLYPHS[arms] ?? "·", fg: "gray" };
   // Arrow terminals are painted outside the stroke grids — no edge can overwrite them (E1).
-  cells[mid][LEFT_ARROW] = { text: "▶", fg: "gray" };
-  cells[mid][RIGHT_ARROW] = { text: "◀", fg: "gray" };
+  cells[mid][geo.leftArrow] = { text: "▶", fg: "gray" };
+  cells[mid][geo.rightArrow] = { text: "◀", fg: "gray" };
 
   return { rows: cells.map(toSegments), width, height, undrawnEdges };
 }

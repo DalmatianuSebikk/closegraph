@@ -18,7 +18,7 @@
 import type { EgoGraphData, EgoGraphPayload, EgoNeighbor } from "../../rpc/index.js";
 import type { GraphNode } from "../graph/types.js";
 import { renderMatches } from "../tools/resolve-ref.js";
-import { egoLayout, egoMinWidth, type EgoBox, type EgoCanvas } from "./ego-layout.js";
+import { egoLayout, egoMinWidth, EGO_PAD, type EgoBox, type EgoCanvas } from "./ego-layout.js";
 import { RISK_SHADING, type Dims } from "./file-map-model.js";
 import { bannerNone, bannerUnavailable, bannerUnknownFreshness, type Banner } from "./banner.js";
 
@@ -71,6 +71,26 @@ const DEFAULT_DIMS: Dims = { width: 80, height: 24 };
 
 /** title + banner + footer chrome reserved out of the visible row budget. */
 const RESERVED_ROWS = 4;
+
+/** Narrowest TERMINAL width at which the graph draws: min canvas + the route's side padding. */
+function graphMinWidth(): number {
+  return egoMinWidth() + EGO_PAD;
+}
+
+/** Elide a too-long title from the LEFT: the qualified name's head is the disposable
+ *  part (the symbol-name TAIL is what identifies the node) and the counts/snapshot
+ *  suffix always survives. Last resort (suffix alone ≥ width): elide the whole line. */
+function elideTitle(t: string, width: number): string {
+  if (t.length <= width) return t;
+  const prefix = "Ego — ";
+  const dash = t.indexOf(" — ", prefix.length);
+  if (dash === -1) return "…" + t.slice(t.length - width + 1);
+  const suffix = t.slice(dash);
+  const ref = t.slice(prefix.length, dash);
+  const keep = width - prefix.length - suffix.length - 1; // −1 for the leading …
+  if (keep <= 0) return "…" + t.slice(t.length - width + 1);
+  return prefix + "…" + ref.slice(ref.length - keep) + suffix;
+}
 
 /** One history entry: the center we left AND the payload we were showing — pops never re-fetch. */
 interface HistoryEntry {
@@ -159,13 +179,19 @@ export function createEgoModel(deps: {
     }
     if (mode === "list") {
       lines = [
-        { text: `terminal too narrow — list view (resize ≥ ${egoMinWidth()} cols for the graph)`, muted: true },
+        { text: `terminal too narrow — list view (resize ≥ ${graphMinWidth()} cols for the graph)`, muted: true },
         { text: `callers (${data.totalCallers}): ${data.callers.slice(0, LIST_CAP).map((n) => n.ref).join(", ")}` },
         { text: `callees (${data.totalCallees}): ${data.callees.slice(0, LIST_CAP).map((n) => n.ref).join(", ")}` },
       ];
       return;
     }
     const out: EgoLine[] = [];
+    const cur = cursorRef();
+    if (cur !== undefined) {
+      // full-name visibility: the selected box's ENTIRE qualified name rides directly
+      // under the title (unmuted), whatever the box width does to the label.
+      out.push({ text: cur });
+    }
     if (data.unresolvedOut > 0) {
       out.push({ text: `unresolved calls: ${data.unresolvedOut} (not drawn — see closegraph_query)`, muted: true });
     }
@@ -177,13 +203,16 @@ export function createEgoModel(deps: {
 
   /** Rebuild the canvas with the CURRENT cursor painted as the selection (Critical 1:
    *  without this, h/j/k/l/clicks move an invisible cursor — the route renders seg
-   *  styles verbatim and never consumes cursorRef). Cheap: fixed geometry, ~1 ms. */
+   *  styles verbatim and never consumes cursorRef). Cheap: fixed geometry, ~1 ms.
+   *  Also refreshes the chrome lines — the selected-ref line tracks the cursor, and
+   *  the windowing budget (state) counts lines.length. */
   function repaint(): void {
     if (boxes === undefined) {
       fullCanvas = undefined;
       return;
     }
-    fullCanvas = egoLayout({ ...boxes, selectedRef: cursorRef() });
+    fullCanvas = egoLayout({ ...boxes, selectedRef: cursorRef(), width: dims.width });
+    rebuildLines();
   }
 
   function apply(payload: EgoGraphPayload, askedRef: string): void {
@@ -219,10 +248,9 @@ export function createEgoModel(deps: {
       callees: payload.callees.map(toBox),
     };
     title = titleFor(currentRef, payload);
-    mode = dims.width < egoMinWidth() ? "list" : "graph";
+    mode = dims.width < graphMinWidth() ? "list" : "graph";
     resetCursor(); // cursor lands on the center BEFORE the first paint (it starts selected)
-    repaint();
-    rebuildLines();
+    repaint(); // paints + rebuilds the chrome lines (selected-ref line included)
   }
 
   /** Row (in the full canvas) of the box's mid line for `ref` — windowing anchor. */
@@ -271,8 +299,8 @@ export function createEgoModel(deps: {
       if (next.width === dims.width && next.height === dims.height) return;
       dims = { ...next };
       if (data !== undefined) {
-        mode = dims.width < egoMinWidth() ? "list" : "graph";
-        rebuildLines();
+        mode = dims.width < graphMinWidth() ? "list" : "graph";
+        repaint(); // re-derive the ADAPTIVE box width + rebuild the chrome lines
       }
     },
 
@@ -361,7 +389,7 @@ export function createEgoModel(deps: {
         canvas = { rows, width: fullCanvas.width, height: rows.length, undrawnEdges: fullCanvas.undrawnEdges };
       }
       return {
-        title,
+        title: elideTitle(title, dims.width - EGO_PAD),
         banner,
         mode,
         ...(canvas !== undefined ? { canvas } : {}),
