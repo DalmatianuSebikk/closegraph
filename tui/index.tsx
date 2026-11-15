@@ -924,7 +924,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   onMount(() => {
     const d = dims()
     model().resize({ width: d.width, height: d.height })
-    void model().load().then(sync, sync)
+    loadIde(model())
   })
 
   // terminal resize re-windows the model without refetches (Review Focus 2 pattern)
@@ -944,7 +944,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     next.resize({ width: d.width, height: d.height })
     setModel(() => next)
     sync()
-    void next.load().then(sync, sync)
+    loadIde(next)
   }
 
   /** EGO_SETTLE_MS family: fire-and-forget re-centers/detail loads land async; a
@@ -956,6 +956,26 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       if (m.detailDirty()) void m.loadDetail().then(sync, sync)
       else sync()
     }, EGO_SETTLE_MS)
+  }
+
+  /** Model-contract detail settle (the ide-model.ts header ruling): detailDirty()
+   *  → loadDetail() — which DEDUPES onto the fetch apply() already started — then
+   *  a repaint when it lands. Deterministic (no timer guess), so a load path that
+   *  arms this can never rest on the inspector's "loading…" line. */
+  const settleDetail = (m: ReturnType<typeof createIdeModel>) => {
+    if (m.detailDirty()) void m.loadDetail().then(sync, sync)
+  }
+
+  /** Load path (onMount + recenterIde): load() resolving means apply() ran, but
+   *  the nodeDetail fetch it fired is still in flight — sync() alone paints the
+   *  inspector's "loading…" line and RESTS on it (at rest no keystroke follows,
+   *  and unbound keys hit `case undefined` and don't sync either — review
+   *  Important 1). Repaint, then arm the deterministic settle. */
+  const loadIde = (m: ReturnType<typeof createIdeModel>): void => {
+    void m.load().then(() => {
+      sync()
+      settleDetail(m)
+    }, sync)
   }
 
   function openPalette(): void {
@@ -1038,6 +1058,18 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         sync()
         const prompt = model().askAgentPrompt()
         if (prompt !== undefined) void runAskAgent(context, prompt)
+        break
+      }
+      case "refresh": {
+        key.preventDefault()
+        // the sibling ego route's pattern (refresh AWAITED, not settled — the
+        // model's dispatch("refresh") hands back no promise): a real rpc
+        // outrunning the 80 ms settle left the refresh — and the detail swap
+        // apply() performs — unpainted until the next bound keystroke
+        void model().refresh().then(() => {
+          sync()
+          settleDetail(model())
+        })
         break
       }
       default: {
