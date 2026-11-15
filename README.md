@@ -15,7 +15,9 @@ change it, and where the risky spots are — without hallucinated answers.
 
 | Surface | What it does |
 |---|---|
-| `/closegraph` route (TUI) | Full-screen **file map** with risk shading → click/`Enter` drills into symbols → **detail panel** (callers, callees, signature, risk) |
+| `/closegraph` (IDE screen) | Pixel-styled code-graph IDE: function cards wired **callers ← focus → callees** (depth 2, caps always disclosed), sidebar with category filters + minimap, inspector (facts, call relations, risk, sinks), 5-key command bar. Bare `/closegraph` opens a symbol picker first |
+| In the IDE screen | `←` / `u` walks focus history · `?` legend + how-it-works · `[6]`/`e` **explain this function** (agent-written, labeled as generated, cached) · `t` **chat sidebar** — ask your agent with the focused card attached; `focus <ref>` recenters · `o` **operations menu** — refactor / tests / docs / harden (risk-gated), sent through chat |
+| Classic graph screen | File map with risk shading → symbols → detail → ego graph — still there via the command palette ("Open CodeGraph") |
 | `p` in the TUI | **Jump palette** — fuzzy-ish prefix search, arrows to move, type to filter |
 | Ask-agent | One keypress **injects a prompt about the node** into your session and jumps to chat |
 | `closegraph_query` (tool) | Node facts + direct callers/callees for 1–10 symbols per call |
@@ -62,7 +64,7 @@ bun run src/cli.ts <repo> hook uninstall
 ## Numbers
 
 - **81.2%** of intra-project call sites resolved on a real repo (excalidraw) — measured, not vibes
-- **360/360** tests green · four languages indexed — TypeScript unchanged, plus Python/PHP/bash packs · snapshot reuse + staleness detection · single-flight indexing
+- **579** tests green · four languages indexed — TypeScript unchanged, plus Python/PHP/bash packs · snapshot reuse + staleness detection · single-flight indexing
 
 ## Risk colors (v1 — structural, honest)
 
@@ -77,7 +79,8 @@ has Finding nodes waiting.
 - ✅ Plan 2 — agent tools
 - ✅ Plan 3 — TUI graph view
 - ✅ Plan 4 — agent experience (batch query, report tool, steering, export + hook)
-- 🔜 Plan 5 — language packs (Python, PHP, bash; Go/C++/Rust to follow)
+- ✅ CodeGraph IDE screen — pixel-accurate graph IDE (cards, edges, inspector, honesty rules) + agent round: symbol-picker entry, back button, `?` info overlay, explain, chat sidebar, operations menu
+- ✅ Plan 5 — language packs (Python, PHP, bash shipped; Go/C++/Rust to follow)
 - 🔜 Plan 6 — deterministic rules layer (Finding nodes + reachability)
 - 🔮 Later — black-box attack-surface mode (endpoints/params as graph nodes)
 
