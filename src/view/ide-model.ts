@@ -42,7 +42,16 @@ import type {
 import type { GraphNode } from "../graph/types.js";
 import { renderMatches } from "../tools/resolve-ref.js";
 import { bannerNone, bannerUnavailable, bannerUnknownFreshness, type Banner } from "./banner.js";
-import { buildChatContextPrefix, CHAT_TURN_CAP, type ChatTurn, type DescribeInput } from "./ide-agent.js";
+import {
+  buildChatContextPrefix,
+  buildOpsPrompt,
+  CHAT_TURN_CAP,
+  opsFor,
+  type ChatTurn,
+  type DescribeInput,
+  type OpId,
+  type OpItem,
+} from "./ide-agent.js";
 import type { Dims } from "./file-map-model.js";
 import { HISTORY_CAP, LIST_CAP } from "./ego-model.js";
 import { IDE_THEME, categoryColor, categoryOf } from "./ide-theme.js";
@@ -73,14 +82,14 @@ export type IdeAction =
   | "depthUp" | "depthDown" | "fit" | "center" | "toggleInspector" | "toggleMinimap" | "toggleSidebar"
   | "help" | "back" | "backCenter" | "refresh"
   | "command1" | "command2" | "command3" | "command4" | "command5" | "command6"
-  | "explain" | "chat";
+  | "explain" | "chat" | "ops";
 
 export const IDE_ACTIONS: readonly IdeAction[] = [
   "left", "right", "up", "down", "open", "collapse", "cyclePanel", "search",
   "depthUp", "depthDown", "fit", "center", "toggleInspector", "toggleMinimap", "toggleSidebar",
   "help", "back", "backCenter", "refresh",
   "command1", "command2", "command3", "command4", "command5", "command6",
-  "explain", "chat",
+  "explain", "chat", "ops",
 ];
 
 export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
@@ -115,6 +124,10 @@ export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
   /** Task 4: t toggles the chat sidebar (talk). While open the route captures
    *  keys palette-style; t with an EMPTY draft (or esc) closes it again. */
   chat: ["t"],
+  /** Task 5: o opens the operations menu on the FOCUSED function. While open
+   *  the route captures keys palette-style (item keys pick, j/k move, enter
+   *  picks, esc closes); synthetic focus / miss screen never open it. */
+  ops: ["o"],
 };
 
 export interface InspectorSection {
@@ -149,6 +162,11 @@ export interface IdeState {
    *  bottom (0 = pinned to latest). Closing the panel NEVER clears it — only
    *  the model's lifetime ends the transcript. */
   chat?: { turns: ChatTurn[]; earlier: number; input: string; scroll: number; status: "idle" | "sending" };
+  /** Task 5 operations menu: present while open. `items` is the risk-gated
+   *  opsFor list for the CURRENT focus (harden only with risk facts); `cursor`
+   *  is the highlighted row. Every pick closes it; a payload swap closes it —
+   *  the menu's basis is the focus it was opened on. */
+  ops?: { items: OpItem[]; cursor: number };
   help?: IdeHelpSection[];
   miss?: { lines: { text: string; muted?: boolean }[] };
   selectedRef?: string;
@@ -207,13 +225,19 @@ const COMMAND_BAR: readonly { key: string; label: string }[] = [
   { key: "6", label: "Explain" },
 ];
 
+/** KEYS section (Task-5 ruling 1 refresh): every key that exists after Task 5 —
+ *  [6]/[e] explain, [t] chat (with the focus-command hint), [o] operations, and
+ *  the header's ← back affordance reworded onto the [u] line. Lines stay ≤ 80
+ *  cols (the overlay clips to the viewport, never wraps). */
 const HELP_KEYS_LINES: readonly string[] = [
   "IDE keys",
   "[h/l] switch column  [j/k] move within column",
-  "[enter] recenter  [space] collapse/expand sides  [u] prev center",
+  "[enter] recenter  [space] collapse/expand sides",
+  "[←] back (click) · [u] prev center",
   "[f] fit origin  [c] center selection  [tab] cycle panel focus",
   "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
+  "[6] explain  [e] explain  [o] operations  [t] chat · \"focus <ref>\" recenters",
   "[r] refresh  [esc] back  [?] close help",
 ];
 
@@ -413,6 +437,9 @@ export function createIdeModel(deps: {
   let localEchoes: ChatTurn[] = [];
   let chatTurns: ChatTurn[] = [];
   let chatEarlier = 0;
+  /** Task 5 operations overlay: present while open. Undefined = closed; every
+   *  pick closes it and a payload swap closes it (see apply). */
+  let ops: { items: OpItem[]; cursor: number } | undefined;
 
   function viewportHeight(): number {
     return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS);
@@ -438,8 +465,15 @@ export function createIdeModel(deps: {
     // Task 4: an open chat rides the SAME overlay path as the inspector in the
     // narrow modes (the route swaps the canvas for it, never squeezes < 40 cols)
     const overlay = (mode === "no-panels" || mode === "compact") && (inspectorOverlay || chatOpen);
+    // Task-5 ruling 3: in full/no-sidebar an open chat occupies the right-panel
+    // slot EVEN when the inspector is toggled off — the visible ChatView costs
+    // the same INSPECTOR_W + SEPARATOR_W the canvas must budget for. (modeFor
+    // guarantees vw stays ≥ MIN_VIEWPORT_W in these modes — full ≥ 160 leaves
+    // ≥ 89, no-sidebar ≥ 100 leaves ≥ 60 — so the chat reservation can never
+    // trip the suppression ladder below.)
+    const showRightPanel = showInspector || (chatOpen && (mode === "full" || mode === "no-sidebar"));
     let vw =
-      dims.width - (showSidebar ? SIDEBAR_W + SEPARATOR_W : 0) - (showInspector ? INSPECTOR_W + SEPARATOR_W : 0);
+      dims.width - (showSidebar ? SIDEBAR_W + SEPARATOR_W : 0) - (showRightPanel ? INSPECTOR_W + SEPARATOR_W : 0);
     let suppressedNote: string | undefined;
     if (vw < MIN_VIEWPORT_W && showSidebar) {
       showSidebar = false;
@@ -581,6 +615,7 @@ export function createIdeModel(deps: {
     depth = 1; // any payload swap (re-center / refresh / history pop) resets depth…
     ring2 = undefined; // …dropping the ring-2 columns…
     ring2Cache.clear(); // …and the per-ref neighbor cache with them
+    ops = undefined; // …and the ops overlay — its items were gated on the OLD focus's risk facts
     if ("error" in payload) {
       data = undefined;
       columns = [];
@@ -1305,6 +1340,56 @@ export function createIdeModel(deps: {
     };
   }
 
+  // --- Task 5: operations menu (all pure; the route owns the send path) -------
+
+  /** o: open the menu on the FOCUSED function. Guards: synthetic/empty focus or
+   *  a miss screen (incl. pre-load) ⇒ no-op — synthetic refs never reach the
+   *  LLM, and there is nothing to operate on without a payload. */
+  function openOps(): void {
+    if (focusRef === "" || isSynthetic(focusRef)) return;
+    if (data === undefined || screen === "miss") return;
+    const ctx = centerRiskContext();
+    ops = {
+      items: opsFor({ hasRiskFacts: ctx.riskReason !== undefined || (ctx.sinks?.length ?? 0) > 0 }),
+      cursor: 0,
+    };
+  }
+
+  function opsMove(delta: number): void {
+    if (ops === undefined) return;
+    ops.cursor = Math.max(0, Math.min(ops.cursor + delta, ops.items.length - 1));
+  }
+
+  function opsClose(): void {
+    ops = undefined;
+  }
+
+  /** Pick one op. EVERY pick closes the overlay first, then:
+   *  - `explain` runs the explain handler itself (≡ dispatch("explain") — the
+   *    [6] chrome lights, the per-ref cache guards, NOTHING is sent);
+   *  - `custom` opens the chat sidebar with the input ready (no send);
+   *  - the edit ops open the chat sidebar, flip it to `sending`, and return the
+   *    context-prefixed prompt for the route's Task-4 sendChat path (the
+   *    request + reply stream into the transcript it just opened). No local
+   *    echo is fabricated — the session's own user row lands via syncChat. */
+  function opsPick(id: OpId): string | undefined {
+    if (ops === undefined) return undefined;
+    ops = undefined; // every pick closes the overlay
+    if (id === "explain") {
+      explain(); // ≡ dispatch("explain") — the same handler, same guards, same cache
+      return undefined;
+    }
+    chatOpen = true; // custom AND the edit ops open the sidebar (the request must be visible)
+    chatScrollPos = 0; // pinned to the latest turn
+    if (id === "custom") return undefined; // the chat input takes it from here
+    const prompt = buildOpsPrompt(id, describeInput());
+    if (prompt === undefined) return undefined; // unreachable for the edit ids — TS narrowing
+    const signature = detail?.ref === focusRef ? detail.payload?.signature : undefined;
+    const prefix = buildChatContextPrefix({ ref: focusRef, ...(signature !== undefined ? { signature } : {}) });
+    chatStatus = "sending";
+    return prefix + prompt;
+  }
+
 
   function state(): IdeState {
     const lay = panelLayout();
@@ -1317,6 +1402,7 @@ export function createIdeModel(deps: {
       commandBar: commandBarState(note),
       ...(helpOpen ? { help: HELP_SECTIONS.map((s) => ({ title: s.title, lines: [...s.lines] })) } : {}),
       ...(chatOpen ? { chat: chatState() } : {}),
+      ...(ops !== undefined ? { ops: { items: ops.items.map((i) => ({ ...i })), cursor: ops.cursor } } : {}),
       focusRef,
       depth,
       historyDepth: history.length,
@@ -1544,6 +1630,9 @@ export function createIdeModel(deps: {
             chatScrollPos = 0; // reopen pinned to the latest turn
           }
           break;
+        case "ops":
+          openOps();
+          break;
       }
     },
 
@@ -1586,6 +1675,12 @@ export function createIdeModel(deps: {
     chatSubmit,
     chatNote,
     chatClose,
+
+    // Task 5 ops overlay: the route drives cursor/pick from its capture branch;
+    // opsPick's returned text goes through the Task-4 sendChat path above.
+    opsMove,
+    opsClose,
+    opsPick,
 
     state,
 

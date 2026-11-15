@@ -24,6 +24,7 @@ import {
   replyAfter,
   type AgentMessageLike,
   type DescribeInput,
+  type OpId,
 } from "../src/view/ide-agent.js"
 import { toSegments, type IdeSegment } from "../src/view/ide-layout.js"
 import type {
@@ -1022,7 +1023,10 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       },
     })
 
-  const [model, setModel] = createSignal(makeModel(props.initialRef ?? ""))
+  // Task-5 ruling 2: the ONLY model swap is this bare-mount one — re-centers
+  // go through model().recenter, so the chat transcript and center history
+  // live as long as the route does.
+  const [model] = createSignal(makeModel(props.initialRef ?? ""))
   const [ideState, setIdeState] = createSignal<IdeState>(model().state())
   const sync = () => setIdeState(model().state())
   const syncPalette = () => setPaletteState(palette.state())
@@ -1094,20 +1098,37 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     )
   }
 
-  /** Palette pick / inspector caller-callee click: re-center on ANY graph ref.
-   *  selectByRef only hits drawn cards, so a fresh model over the picked ref is
-   *  the route-level re-center path (center history resets — the same shape as
-   *  opening the route with a ref argument). The chat's `focus <ref>` command
-   *  deliberately uses model.recenter instead — a re-center must not clear the
-   *  chat transcript (Task 4). */
-  function recenterIde(ref: string): void {
-    const next = makeModel(ref)
-    const d = dims()
-    next.resize({ width: d.width, height: d.height })
-    setChatOpen(false) // a fresh model ends the transcript (the model's lifetime)
-    setModel(() => next)
+  /** Ops-pick paths open the chat INSIDE the model (opsPick runs explain/custom/
+   *  edit picks) — mirror that into the route's chatOpen signal and pull the
+   *  existing session history, exactly like the t-key branch does, so the
+   *  reactive turn-sync effect starts watching the transcript. */
+  const chatOpenedViaModel = (m: ReturnType<typeof createIdeModel>): void => {
+    if (m.state().chat === undefined) return
+    setChatOpen(true)
+    syncChatFromStore()
+  }
+
+  /** Task 5 ops pick (item key, enter, or row click): the model closes the
+   *  overlay, runs explain / opens chat / hands back the context-prefixed
+   *  prompt — the route only mirrors the chat-open and sends via the Task-4
+   *  sendChat path (no third sender). No session ⇒ sendChat's pinned note. */
+  const pickOp = (id: OpId) => {
+    const m = model() // seq-guard family: a model swap mid-send drops the settle
+    const text = m.opsPick(id)
     sync()
-    loadIde(next)
+    chatOpenedViaModel(m)
+    if (text !== undefined) sendChat(text)
+  }
+
+  /** Palette pick / inspector caller-callee click: re-center THROUGH the live
+   *  model (Task-5 ruling 2) — no fresh model, so the chat transcript and the
+   *  `u` center history survive the re-center (the same path the chat's
+   *  `focus <ref>` command uses). The settle repaints when the async apply()
+   *  lands; the bare-mount fresh model (makeModel) is the only model swap left. */
+  function recenterIde(ref: string): void {
+    model().recenter(ref)
+    sync()
+    settleIde()
   }
 
   /** EGO_SETTLE_MS family: fire-and-forget re-centers/detail loads land async; a
@@ -1129,11 +1150,12 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     if (m.detailDirty()) void m.loadDetail().then(sync, sync)
   }
 
-  /** Load path (onMount + recenterIde): load() resolving means apply() ran, but
-   *  the nodeDetail fetch it fired is still in flight — sync() alone paints the
-   *  inspector's "loading…" line and RESTS on it (at rest no keystroke follows,
-   *  and unbound keys hit `case undefined` and don't sync either — review
-   *  Important 1). Repaint, then arm the deterministic settle. */
+  /** Load path (onMount — the only remaining caller): load() resolving means
+   *  apply() ran, but the nodeDetail fetch it fired is still in flight —
+   *  sync() alone paints the inspector's "loading…" line and RESTS on it (at
+   *  rest no keystroke follows, and unbound keys hit `case undefined` and
+   *  don't sync either — review Important 1). Repaint, then arm the
+   *  deterministic settle. */
   const loadIde = (m: ReturnType<typeof createIdeModel>): void => {
     void m.load().then(() => {
       sync()
@@ -1200,6 +1222,43 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       return
     }
 
+    // ops overlay (Task 5): palette-style capture alongside the help branch —
+    // while open, the item keys (r/t/d/h/e/c) pick, j/k and the arrows move the
+    // cursor, enter picks the cursor item, esc closes; ALL other keys are
+    // swallowed (those letters are dispatch actions otherwise — the overlay owns
+    // them while it is up; nothing leaks into navigation)
+    if (ideState().ops !== undefined) {
+      key.preventDefault()
+      const m = model()
+      if (key.name === "escape" || key.name === "esc") {
+        m.opsClose()
+        sync()
+        return
+      }
+      if (key.name === "up" || key.name === "k") {
+        m.opsMove(-1)
+        sync()
+        return
+      }
+      if (key.name === "down" || key.name === "j") {
+        m.opsMove(1)
+        sync()
+        return
+      }
+      if (key.name === "enter" || key.name === "return") {
+        const st = m.state().ops
+        const item = st === undefined ? undefined : st.items[st.cursor]
+        if (item !== undefined) pickOp(item.id)
+        return
+      }
+      const typed = printable(key)
+      if (typed !== undefined) {
+        const item = (m.state().ops?.items ?? []).find((i) => i.key === typed)
+        if (item !== undefined) pickOp(item.id)
+      }
+      return
+    }
+
     // chat sidebar third (Task 4): palette-style capture — while open, EVERY
     // key is swallowed (typing/scroll/submit/close); nothing leaks into
     // navigation. esc always closes; t closes only with an EMPTY draft
@@ -1235,8 +1294,8 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         const result = m.chatSubmit()
         sync()
         if (result?.kind === "focus") {
-          // model.recenter — NOT recenterIde's fresh model: a re-center must
-          // NOT clear the transcript (only the model's lifetime ends it)
+          // model.recenter — the same live-model path recenterIde uses now
+          // (Task-5 ruling 2): a re-center NEVER clears the transcript
           m.recenter(result.ref)
           sync()
           settleIde()
@@ -1425,6 +1484,39 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     )
   }
 
+  /** Task 5 ops overlay: the focused function's operations menu — the palette
+   *  idiom (› cursor row, gray highlight, click to pick), titled by the focus
+   *  ref so the target is never ambiguous. Full-screen overlay like help; the
+   *  harden row exists only when the focus has risk facts (the model's list). */
+  const IdeOpsOverlay = (opsProps: { ops: NonNullable<IdeState["ops"]>; ref: string }) => (
+    <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
+      <text width="100%" height={1} flexShrink={0} fg="cyan">
+        {`operations on ${opsProps.ref}`}
+      </text>
+      <box flexDirection="column" paddingTop={0} flexGrow={1}>
+        {...opsProps.ops.items.map((item, i) => (
+          <box
+            flexDirection="row"
+            height={1}
+            flexShrink={0}
+            backgroundColor={i === opsProps.ops.cursor ? "gray" : undefined}
+            onMouseDown={() => pickOp(item.id)}
+          >
+            <text width={3} height={1} flexShrink={0} fg={i === opsProps.ops.cursor ? "black" : undefined}>
+              {i === opsProps.ops.cursor ? "›" : " "}
+            </text>
+            <text height={1} flexShrink={0} fg={i === opsProps.ops.cursor ? "black" : undefined}>
+              {`[${item.key}] ${item.label}`}
+            </text>
+          </box>
+        ))}
+      </box>
+      <text width="100%" height={1} flexShrink={0} fg="gray">
+        {"pick a key · j/k move · enter picks · esc close"}
+      </text>
+    </box>
+  )
+
   const HeaderView = (headerProps: { s: IdeState }) => (
     <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
       <box flexDirection="row" height={1} flexShrink={0}>
@@ -1596,6 +1688,9 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         if (paletteState().open) return <IdePaletteOverlay />
         const s = ideState()
         if (s.help !== undefined) return <IdeHelpOverlay sections={s.help} />
+        // Task 5: the ops overlay is a full-screen overlay alongside help — it
+        // swallows keys and screen while open (the route branch above)
+        if (s.ops !== undefined) return <IdeOpsOverlay ops={s.ops} ref={s.focusRef} />
         // Task 4: an open chat rides the inspector-overlay path in the narrow
         // modes — it REPLACES the canvas (the model's `chat replaces canvas`
         // note family), never squeezes a <40-col viewport. In full/no-sidebar

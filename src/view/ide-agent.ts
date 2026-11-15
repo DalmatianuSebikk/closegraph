@@ -26,14 +26,22 @@ export interface DescribeInput {
 /** Pinned prompt shape: header + `ref:` line, then ONLY the fields that exist
  *  (signature line, verbatim source block, risk line, sinks line). */
 export function buildExplainPrompt(input: DescribeInput): string {
-  const lines = ["Explain in ONE short paragraph what this function does.", `ref: ${input.ref}`];
+  return ["Explain in ONE short paragraph what this function does.", ...describeFieldLines(input)].join("\n");
+}
+
+/** The honest field block every describe-style prompt shares (Task 5: the ops
+ *  templates reuse it verbatim): the ref always; signature, source block, risk
+ *  line, and sinks line ONLY when they exist — never an invented signature,
+ *  never a dangling header. */
+function describeFieldLines(input: DescribeInput): string[] {
+  const lines = [`ref: ${input.ref}`];
   if (input.signature !== undefined) lines.push(`signature: ${input.signature}`);
   if (input.source !== undefined && input.source.length > 0) lines.push("source:", ...input.source);
   if (input.riskReason !== undefined) lines.push(`risk: ${input.riskReason}`);
   if (input.sinks !== undefined && input.sinks.length > 0) {
     lines.push(`sinks: ${input.sinks.map((s) => (s.count > 1 ? `${s.name} ×${s.count}` : s.name)).join(", ")}`);
   }
-  return lines.join("\n");
+  return lines;
 }
 
 /** Structural message row the extraction understands. The route maps the solid
@@ -90,4 +98,49 @@ export function extractChatTurns(messages: AgentMessageLike[]): ChatTurn[] {
  *  entirely (raw text + the model's `no graph context` note). */
 export function buildChatContextPrefix(input: { ref: string; signature?: string }): string {
   return `[graph focus: ${input.ref}${input.signature !== undefined ? ` — ${input.signature}` : ""}]\n`;
+}
+
+// --- Task 5: operations menu ---------------------------------------------------
+
+/** Pickable operation on the focused function. `explain` ≡ the explain action;
+ *  `custom` opens the chat with no prefilled prompt (buildOpsPrompt ⇒ undefined). */
+export type OpId = "refactor" | "tests" | "docs" | "harden" | "explain" | "custom";
+
+export interface OpItem {
+  id: OpId;
+  key: string;
+  label: string;
+}
+
+/** The pinned menu: refactor/tests/docs always; `harden` ONLY when the focus
+ *  has risk facts (a harden ask without risks would invent work); explain and
+ *  custom last. Order + keys + labels frozen by the ide-agent tests. */
+export function opsFor(input: { hasRiskFacts: boolean }): OpItem[] {
+  return [
+    { id: "refactor", key: "r", label: "refactor" },
+    { id: "tests", key: "t", label: "write tests" },
+    { id: "docs", key: "d", label: "doc comment" },
+    ...(input.hasRiskFacts ? [{ id: "harden" as const, key: "h", label: "harden" }] : []),
+    { id: "explain", key: "e", label: "explain" },
+    { id: "custom", key: "c", label: "custom (chat)" },
+  ];
+}
+
+/** The CONCRETE, edit-oriented ask each op carries above the shared field block. */
+const OP_ASKS: Record<Exclude<OpId, "explain" | "custom">, string> = {
+  refactor: "Propose a concrete refactor of this function: named steps with exact before/after code changes.",
+  tests: "Write concrete unit tests for this function: one test per line — a name and the behavior it pins.",
+  docs: "Write a concrete doc comment for this function: a summary line plus one line per parameter and the return.",
+  harden: "Propose concrete hardening for this function: for each risk an exact edit that mitigates it.",
+};
+
+/** `custom` ⇒ undefined (the pick opens the chat instead); `explain` ⇒ the
+ *  explain prompt VERBATIM (the pick routes through the explain action — same
+ *  prompt either way); every other op ⇒ its concrete ask over the same honest
+ *  field block the explain prompt carries (ref + signature/source/risk only
+ *  when present). */
+export function buildOpsPrompt(op: OpId, input: DescribeInput): string | undefined {
+  if (op === "custom") return undefined;
+  if (op === "explain") return buildExplainPrompt(input);
+  return [OP_ASKS[op], ...describeFieldLines(input)].join("\n");
 }
