@@ -11,8 +11,12 @@
  *   placeholder card and the header stats carry the exact hidden count.
  * - Missing values render as `—` (signature, guards, sinks); unresolved calls
  *   are a count line, never drawn as edges.
- * - Depth is 1 in this task: depthUp past MAX pins the disclosed note
- *   `depth 2 lands with ring expansion` (Task 5 replaces this with real rings).
+ * - Depth expands to MAX_DEPTH=2 (Task 5): depthUp fetches every shown ring-1
+ *   neighbor's ego graph in parallel and builds far-side ring-2 columns under a
+ *   NODE_BUDGET of 40 total real cards; the skipped remainder is disclosed per
+ *   column (`+N more (depth budget)` placeholder) and in the stats hidden count.
+ *   depthUp past MAX pins the disclosed note `depth capped at 2 — node budget`;
+ *   any payload swap (re-center / refresh / history pop) resets depth to 1.
  * - The graph viewport is NEVER < 40 cols: panels are suppressed first and the
  *   command-bar note discloses it (compact-mode inspector overlay ⇒ the route
  *   replaces the canvas instead of splitting).
@@ -78,7 +82,7 @@ export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
   cyclePanel: ["tab"],
   search: ["/"],
   depthUp: ["+"],
-  depthDown: ["-"],
+  depthDown: ["d", "-"], // Task-5 ruling: d = mnemonic (verified free); "-" keeps the [+/-] pair
   fit: ["f"],
   center: ["c"],
   toggleInspector: ["i"],
@@ -134,8 +138,8 @@ const SOURCE_EXCERPT_LINES = 8;
 
 const DEFAULT_DIMS: Dims = { width: 80, height: 24 };
 
-/** Pinned note for depthUp past MAX=1 (Task 5 replaces this with real depth 2). */
-const DEPTH_NOTE = "depth 2 lands with ring expansion";
+/** Pinned note for depthUp at MAX_DEPTH — the node budget is the ceiling, no ring 3. */
+const DEPTH_CAP_NOTE = "depth capped at 2 — node budget";
 
 const COMMAND_BAR: readonly { key: string; label: string }[] = [
   { key: "1", label: "Trace callers" },
@@ -150,7 +154,7 @@ const HELP_LINES: readonly string[] = [
   "[h/l] switch column  [j/k] move within column",
   "[enter] recenter  [space] collapse/expand sides  [u] prev center",
   "[f] fit origin  [c] center selection  [tab] cycle panel focus",
-  "[b] sidebar  [i] inspector  [m] minimap  [+] depth  [/] search",
+  "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
   "[r] refresh  [esc] back  [?] close help",
 ];
@@ -163,6 +167,11 @@ function modeFor(width: number): IdeMode {
   if (width >= LIST_MIN_W) return "compact";
   return "list";
 }
+
+/** Ring distance the model can expand to (Task 5): center=0, ring 1, ring 2. */
+export const MAX_DEPTH = 2;
+/** Total REAL (non-placeholder) cards across ALL columns at depth 2 (center + ring 1 + ring 2). */
+export const NODE_BUDGET = 40;
 
 /** Symbol tail of a qualifiedName (the ref's identifying part). */
 function shortName(ref: string): string {
@@ -189,9 +198,27 @@ function toCard(n: EgoNeighbor): IdeCard {
 }
 
 /** Dashed collapsed-summary card (hub caps / space-collapse). Synthetic `+…` ref. */
-function placeholderCard(ref: string, n: number): IdeCard {
+function placeholderCard(ref: string, n: number, parentRef?: string): IdeCard {
   const text = `+${n} more`;
-  return { ref, name: text, category: "", file: "", startLine: 0, risk: "low", fanIn: 0, fanOut: 0, placeholder: text };
+  return {
+    ref,
+    name: text,
+    category: "",
+    file: "",
+    startLine: 0,
+    risk: "low",
+    fanIn: 0,
+    fanOut: 0,
+    placeholder: text,
+    ...(parentRef !== undefined ? { parentRef } : {}),
+  };
+}
+
+/** `+N more (depth budget)` disclosure for a ring-2 column the node budget cut short;
+ *  `parentRef` keeps its dashed edge routed to the ring-1 parent of the first skip. */
+function budgetCard(side: "left" | "right", n: number, parentRef: string): IdeCard {
+  const text = `+${n} more (depth budget)`;
+  return { ref: `+budget:${side}`, name: text, category: "", file: "", startLine: 0, risk: "low", fanIn: 0, fanOut: 0, placeholder: text, parentRef };
 }
 
 const isSynthetic = (ref: string): boolean => ref.startsWith("+");
@@ -267,6 +294,14 @@ export function createIdeModel(deps: {
   let sourceRequested = false;
   let source: SourceState | undefined;
   let sourceSeq = 0;
+  /** Current ring distance shown: 1 (callers/center/callees) or 2 (+ far-side rings). */
+  let depth = 1;
+  /** Depth-2 expansion state: far-side cards per ring-2 column + budget-skipped counts. */
+  let ring2: { left: IdeCard[]; right: IdeCard[]; skippedLeft: number; skippedRight: number } | undefined;
+  /** Per-ref cache of ring-1 neighbor payloads (success shapes only — errors never
+   *   cache) — depthDown → depthUp re-fetches nothing. Cleared on every payload swap
+   *  (re-center) along with the depth reset. */
+  const ring2Cache = new Map<string, EgoGraphData>();
 
   function viewportHeight(): number {
     return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS);
@@ -315,11 +350,19 @@ export function createIdeModel(deps: {
 
   function hiddenCount(): number {
     if (data === undefined) return 0;
-    return data.totalCallers - data.callers.length + (data.totalCallees - data.callees.length);
+    return (
+      data.totalCallers -
+      data.callers.length +
+      (data.totalCallees - data.callees.length) +
+      (ring2?.skippedLeft ?? 0) +
+      (ring2?.skippedRight ?? 0)
+    );
   }
 
-  /** Build the three layout columns (callers / center / callees) from the payload,
-   *  honouring hub-cap placeholders and the space-collapse side summary. */
+  /** Build the layout columns from the payload + expansion state (callers / center /
+   *  callees at depth 1; ring-2 far-side columns inserted at depth 2 in the order
+   *  [left ring2, left ring1, center, right ring1, right ring2]), honouring hub-cap
+   *  placeholders and the space-collapse side summary. */
   function buildColumns(): void {
     if (data === undefined) {
       columns = [];
@@ -334,11 +377,25 @@ export function createIdeModel(deps: {
       if (total > refs.length) cards.push(placeholderCard(`+more:${synthetic}`, total - refs.length));
       return cards;
     };
-    columns = [
-      { side: "left", ring: 1, cards: side(data.callers, data.totalCallers, "callers") },
-      { side: "center", ring: 0, cards: [toCard(data.center)] },
-      { side: "right", ring: 1, cards: side(data.callees, data.totalCallees, "callees") },
-    ];
+    const center: IdeColumn = { side: "center", ring: 0, cards: [toCard(data.center)] };
+    const leftRing1: IdeColumn = { side: "left", ring: 1, cards: side(data.callers, data.totalCallers, "callers") };
+    const rightRing1: IdeColumn = { side: "right", ring: 1, cards: side(data.callees, data.totalCallees, "callees") };
+    if (depth === 1 || ring2 === undefined) {
+      columns = [leftRing1, center, rightRing1];
+      return;
+    }
+    // a ring-2 column renders only when it has cards; under collapse it becomes one
+    // summary card (parentRef keeps its dashed edge routed to the ring-1 parent)
+    const ring2Col = (sideName: "left" | "right", cards: IdeCard[]): IdeColumn | undefined => {
+      if (cards.length === 0) return undefined;
+      if (!collapsed) return { side: sideName, ring: 2, cards };
+      const real = cards.filter((card) => card.placeholder === undefined);
+      if (real.length === 0) return undefined; // disclosure-only column: stats carry the count
+      return { side: sideName, ring: 2, cards: [placeholderCard(`+collapsed:${sideName}2`, real.length, real[0]?.parentRef)] };
+    };
+    const l2 = ring2Col("left", ring2.left);
+    const r2 = ring2Col("right", ring2.right);
+    columns = [...(l2 !== undefined ? [l2] : []), leftRing1, center, rightRing1, ...(r2 !== undefined ? [r2] : [])];
   }
 
   function repaint(): void {
@@ -400,6 +457,9 @@ export function createIdeModel(deps: {
     source = undefined;
     sourceRequested = false;
     detail = undefined;
+    depth = 1; // any payload swap (re-center / refresh / history pop) resets depth…
+    ring2 = undefined; // …dropping the ring-2 columns…
+    ring2Cache.clear(); // …and the per-ref neighbor cache with them
     if ("error" in payload) {
       data = undefined;
       columns = [];
@@ -470,9 +530,145 @@ export function createIdeModel(deps: {
     apply(entry.payload);
   }
 
+  /** Depth change rebuilds the columns under NEW indices — re-point the cursor at the
+   *  first surviving ref (the selection, then a dropped ring-2 card's parent, then
+   *  the center). Remembered rows stay index-keyed; moveColumn clamps them on use. */
+  function restoreSelection(fallbacks: (string | undefined)[]): void {
+    for (const ref of fallbacks) {
+      if (ref === undefined) continue;
+      for (let c = 0; c < columns.length; c++) {
+        const at = columns[c].cards.findIndex((card) => card.ref === ref);
+        if (at >= 0) {
+          columnRows[cursor.col] = cursor.row;
+          cursor = { col: c, row: at };
+          columnRows[c] = at;
+          return;
+        }
+      }
+    }
+    const ci = columns.findIndex((c) => c.ring === 0);
+    columnRows[cursor.col] = cursor.row;
+    cursor = { col: ci, row: 0 };
+    columnRows[ci] = 0;
+  }
+
+  /** Pure build of the depth-2 ring columns from the neighbor payloads: each ring-2
+   *  card carries its ring-1 `parentRef`; refs already present in ANY column dedupe
+   *  (first-seen wins); the NODE_BUDGET stop skips the remainder and returns the
+   *  per-column counts + placeholder parents for disclosure. Cards group by parent
+   *  index (then code-unit ref) so children of the same parent stay contiguous. */
+  function buildRing2(
+    d: EgoGraphData,
+    neighbors: { ref: string; far: "callers" | "callees" }[],
+    payloads: (EgoGraphData | undefined)[],
+  ): { left: IdeCard[]; right: IdeCard[]; skippedLeft: number; skippedRight: number } {
+    const seen = new Set<string>([d.center.ref]);
+    for (const n of d.callers) seen.add(n.ref);
+    for (const n of d.callees) seen.add(n.ref);
+    let real = 1 + d.callers.length + d.callees.length; // real depth-1 cards already drawn
+    const left: IdeCard[] = [];
+    const right: IdeCard[] = [];
+    let skippedLeft = 0;
+    let skippedRight = 0;
+    let budgetParentLeft: string | undefined; // parent of the first skipped candidate
+    let budgetParentRight: string | undefined;
+    for (let i = 0; i < neighbors.length; i++) {
+      const nb = neighbors[i];
+      if (nb === undefined) continue;
+      const payload = payloads[i];
+      if (payload === undefined) continue; // failed neighbor fetch: no far side to draw
+      for (const n of nb.far === "callers" ? payload.callers : payload.callees) {
+        if (seen.has(n.ref)) continue; // already present in any column — first-seen wins
+        if (real >= NODE_BUDGET) {
+          if (nb.far === "callers") {
+            skippedLeft++;
+            budgetParentLeft ??= nb.ref;
+          } else {
+            skippedRight++;
+            budgetParentRight ??= nb.ref;
+          }
+          continue;
+        }
+        seen.add(n.ref);
+        real++;
+        (nb.far === "callers" ? left : right).push({ ...toCard(n), parentRef: nb.ref });
+      }
+    }
+    const groupByParent = (cards: IdeCard[], parents: EgoNeighbor[]): IdeCard[] => {
+      const parentIndex = new Map(parents.map((p, i) => [p.ref, i]));
+      return [...cards].sort((a, b) => {
+        const pa = parentIndex.get(a.parentRef ?? "") ?? 0;
+        const pb = parentIndex.get(b.parentRef ?? "") ?? 0;
+        return pa !== pb ? pa - pb : a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0;
+      });
+    };
+    const groupedLeft = groupByParent(left, d.callers);
+    const groupedRight = groupByParent(right, d.callees);
+    if (skippedLeft > 0 && budgetParentLeft !== undefined) groupedLeft.push(budgetCard("left", skippedLeft, budgetParentLeft));
+    if (skippedRight > 0 && budgetParentRight !== undefined) groupedRight.push(budgetCard("right", skippedRight, budgetParentRight));
+    return { left: groupedLeft, right: groupedRight, skippedLeft, skippedRight };
+  }
+
+  /** depthUp: 1 → 2. Fetches every shown ring-1 neighbor's ego graph in parallel
+   *  (code-unit order, per-ref cache) and builds ring-2 columns from each neighbor's
+   *  FAR side (callers of callers / callees of callees). loadSeq-guarded like load();
+   *  at MAX_DEPTH it only pins the cap note — never a third ring. */
+  async function expandDepth(): Promise<void> {
+    if (data === undefined) return;
+    if (depth >= MAX_DEPTH) {
+      actionNote = DEPTH_CAP_NOTE;
+      return;
+    }
+    const d = data;
+    const seq = ++loadSeq;
+    const neighbors = [
+      ...d.callers.map((n) => ({ ref: n.ref, far: "callers" as const })),
+      ...d.callees.map((n) => ({ ref: n.ref, far: "callees" as const })),
+    ];
+    const payloads = await Promise.all(
+      neighbors.map(({ ref }) => {
+        const cached = ring2Cache.get(ref);
+        if (cached !== undefined) return Promise.resolve(cached);
+        return deps
+          .egoGraph(ref)
+          .then((payload): EgoGraphData | undefined => {
+            if ("error" in payload) return undefined; // miss/unavailable: no far side
+            ring2Cache.set(ref, payload);
+            return payload;
+          })
+          .catch(() => undefined);
+      }),
+    );
+    if (seq !== loadSeq) return; // a newer load/refresh/re-center already won
+    const prevSelected = selectedRef();
+    const prevParent = columns.flatMap((c) => c.cards).find((card) => card.ref === prevSelected)?.parentRef;
+    ring2 = buildRing2(d, neighbors, payloads);
+    depth = MAX_DEPTH;
+    actionNote = undefined;
+    buildColumns();
+    restoreSelection([prevSelected, prevParent]);
+    repaint();
+    scrollIntoView();
+  }
+
+  /** depthDown: 2 → 1 — ring-2 columns drop (their payloads stay cached, so a repeat
+   *  depthUp re-fetches nothing). No-op at depth 1. */
+  function contractDepth(): void {
+    if (depth === 1 || data === undefined) return;
+    depth = 1;
+    const prevSelected = selectedRef();
+    const prevParent = columns.flatMap((c) => c.cards).find((card) => card.ref === prevSelected)?.parentRef;
+    ring2 = undefined;
+    actionNote = undefined;
+    buildColumns();
+    restoreSelection([prevSelected, prevParent]);
+    repaint();
+    scrollIntoView();
+  }
+
   function moveColumn(delta: 1 | -1): void {
     const target = cursor.col + delta;
-    if (target < 0 || target > 2) return;
+    if (target < 0 || target >= columns.length) return; // 3 columns at depth 1, up to 5 at depth 2
     const col = columns[target];
     if (col === undefined || col.cards.length === 0) return;
     const remembered = columnRows[target];
@@ -561,11 +757,13 @@ export function createIdeModel(deps: {
   function traceCallers(): void {
     lastCommand = 1;
     if (data === undefined || fullCanvas === undefined) return;
-    if (cursor.col === 0) {
+    const callersIdx = columns.findIndex((c) => c.side === "left" && c.ring === 1);
+    if (callersIdx === -1) return;
+    if (cursor.col === callersIdx) {
       open();
       return;
     }
-    const callersCol = columns[0];
+    const callersCol = columns[callersIdx];
     if (callersCol === undefined || callersCol.cards.length === 0) return;
     const centerRect = fullCanvas.cardRects.get(focusRef);
     const centerMid = centerRect === undefined ? 0 : centerRect.y + CARD_MID_ROW;
@@ -581,8 +779,8 @@ export function createIdeModel(deps: {
       }
     });
     columnRows[cursor.col] = cursor.row;
-    cursor = { col: 0, row: best };
-    columnRows[0] = best;
+    cursor = { col: callersIdx, row: best };
+    columnRows[callersIdx] = best;
     afterSelectionChange();
   }
 
@@ -645,14 +843,20 @@ export function createIdeModel(deps: {
     return promise;
   }
 
+  /** Real card count a `+collapsed:*` summary stands for (ring-1 side or ring-2 column). */
+  function collapsedHidden(ref: string): number {
+    if (ring2 !== undefined && ref === "+collapsed:left2") return ring2.left.filter((c) => c.placeholder === undefined).length;
+    if (ring2 !== undefined && ref === "+collapsed:right2") return ring2.right.filter((c) => c.placeholder === undefined).length;
+    return ref.endsWith("callers") ? (data?.callers.length ?? 0) : (data?.callees.length ?? 0);
+  }
+
   function inspectorSections(ref: string | undefined): InspectorSection[] {
     if (ref === undefined) return [];
     if (isSynthetic(ref)) {
-      const label = ref.includes(":") ? ref.slice(ref.indexOf(":") + 1) : ref;
-      const count = label === "callers" ? (data?.callers.length ?? 0) : (data?.callees.length ?? 0);
+      const card = columns.flatMap((c) => c.cards).find((c) => c.ref === ref);
       const text = ref.startsWith("+collapsed:")
-        ? `+${count} more (collapsed — space restores)`
-        : (columns.flatMap((c) => c.cards).find((card) => card.ref === ref)?.placeholder ?? ref);
+        ? `+${collapsedHidden(ref)} more (collapsed — space restores)`
+        : (card?.placeholder ?? ref);
       return [{ title: "GENERAL", lines: [{ text, fg: IDE_THEME.textMuted }] }];
     }
     if (detail?.ref !== ref) {
@@ -755,7 +959,7 @@ export function createIdeModel(deps: {
       commandBar: commandBarState(note),
       ...(helpOpen ? { help: [...HELP_LINES] } : {}),
       focusRef,
-      depth: 1,
+      depth,
       historyDepth: history.length,
     };
 
@@ -861,14 +1065,16 @@ export function createIdeModel(deps: {
 
   function headerState(): IdeState["header"] {
     const drawnNodes = columns.reduce((n, col) => n + col.cards.filter((card) => card.placeholder === undefined).length, 0);
-    const nonCenterCards = (columns[0]?.cards.length ?? 0) + (columns[2]?.cards.length ?? 0);
+    // every non-center card owns exactly one edge (ring 1 → center, ring 2 → parentRef)
+    const centerCol = columns.findIndex((c) => c.ring === 0);
+    const nonCenterCards = columns.reduce((n, col, i) => (i === centerCol ? n : n + col.cards.length), 0);
     const drawnEdges = nonCenterCards - (fullCanvas?.undrawnEdges ?? 0);
     return {
       breadcrumb: `codegraph › ${shortName(focusRef)}`,
       repoLabel: data?.source ?? "",
       status: `focus: ${panelFocus}`,
       tabs: tabsState(),
-      stats: `${shortName(focusRef)} — ${drawnNodes} nodes, ${drawnEdges} edges, ${hiddenCount()} hidden, depth 1`,
+      stats: `${shortName(focusRef)} — ${drawnNodes} nodes, ${drawnEdges} edges, ${hiddenCount()} hidden, depth ${depth}`,
     };
   }
 
@@ -920,10 +1126,11 @@ export function createIdeModel(deps: {
         case "search":
           break; // the route opens the existing palette; a pick re-centers
         case "depthUp":
-          actionNote = DEPTH_NOTE; // depth stays 1 in this task — Task 5 replaces this
+          void expandDepth();
           break;
         case "depthDown":
-          break; // depth is 1 — no-op
+          contractDepth();
+          break;
         case "fit":
           fitView();
           break;
@@ -961,7 +1168,7 @@ export function createIdeModel(deps: {
           break;
         case "command4":
           lastCommand = 4;
-          actionNote = DEPTH_NOTE;
+          void expandDepth();
           break;
         case "command5":
           lastCommand = 5;
@@ -969,6 +1176,11 @@ export function createIdeModel(deps: {
           break;
       }
     },
+
+    /** Re-center on any real graph ref (history push + load). Exported for the route
+     *  (Task-4 review note): palette picks and inspector links may target refs that
+     *  no drawn card carries — the route is not required to adopt it yet. */
+    recenter,
 
     /** Click parity: select `ref`; if it is ALREADY selected (and not the center) ⇒ open(). */
     selectByRef(ref: string): void {
