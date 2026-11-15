@@ -12,6 +12,7 @@ import {
   IDE_KEYMAP,
   SIDEBAR_W,
   INSPECTOR_W,
+  SEPARATOR_W,
   HEADER_ROWS,
   COMMAND_ROWS,
   type IdeState,
@@ -1111,9 +1112,10 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
-  /** D4: panel separators are CHARACTER columns (│), never border* props. */
+  /** D4: panel separators are CHARACTER columns (│), never border* props. Each
+   *  costs SEPARATOR_W — the model's vw budgets it (Task-6 render delta). */
   const Separator = () => (
-    <box flexDirection="column" width={1} flexShrink={0}>
+    <box flexDirection="column" width={SEPARATOR_W} flexShrink={0}>
       {...Array.from({ length: Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS) }, () => (
         <text width={1} height={1} flexShrink={0} fg={IDE_THEME.borderSubtle}>
           │

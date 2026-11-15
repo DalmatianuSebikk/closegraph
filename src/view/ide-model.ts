@@ -56,6 +56,9 @@ export type IdeMode = "full" | "no-sidebar" | "no-panels" | "compact" | "list";
 export type PanelFocus = "sidebar" | "graph" | "inspector";
 export const SIDEBAR_W = 30;
 export const INSPECTOR_W = 39;
+/** The route's D4 panel separator (a │ character column) — a drawn panel costs
+ *  its width PLUS this column, so the model's viewport equals the rendered canvas. */
+export const SEPARATOR_W = 1;
 export const HEADER_ROWS = 3;
 export const COMMAND_ROWS = 3;
 
@@ -309,7 +312,10 @@ export function createIdeModel(deps: {
 
   /** Panel availability/visibility + the resulting viewport width. The viewport is
    *  NEVER < MIN_VIEWPORT_W: the sidebar is suppressed first, then the inspector
-   *  panel; a compact-mode inspector overlay falls back to replacing the canvas. */
+   *  panel; a compact-mode inspector overlay falls back to replacing the canvas.
+   *  Each drawn panel also costs its SEPARATOR_W │ column (Task-6 render delta:
+   *  the route's flex row gives the canvas exactly width − panels − separators,
+   *  and the model's scroll/window math must match that rendered width). */
   function panelLayout(): {
     mode: IdeMode;
     showSidebar: boolean;
@@ -322,7 +328,8 @@ export function createIdeModel(deps: {
     let showSidebar = mode === "full" && !sidebarOff;
     let showInspector = (mode === "full" || mode === "no-sidebar") && !inspectorOff;
     const overlay = (mode === "no-panels" || mode === "compact") && inspectorOverlay;
-    let vw = dims.width - (showSidebar ? SIDEBAR_W : 0) - (showInspector ? INSPECTOR_W : 0);
+    let vw =
+      dims.width - (showSidebar ? SIDEBAR_W + SEPARATOR_W : 0) - (showInspector ? INSPECTOR_W + SEPARATOR_W : 0);
     let suppressedNote: string | undefined;
     if (vw < MIN_VIEWPORT_W && showSidebar) {
       showSidebar = false;
