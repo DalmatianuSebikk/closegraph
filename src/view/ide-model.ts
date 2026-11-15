@@ -15,8 +15,13 @@
  *   neighbor's ego graph in parallel and builds far-side ring-2 columns under a
  *   NODE_BUDGET of 40 total real cards; the skipped remainder is disclosed per
  *   column (`+N more (depth budget)` placeholder) and in the stats hidden count.
- *   depthUp past MAX pins the disclosed note `depth capped at 2 — node budget`;
- *   any payload swap (re-center / refresh / history pop) resets depth to 1.
+ *   Each consulted neighbor's OWN far-side hub cap (the rpc's per-side limit —
+ *   exact totals ride the payload) folds into the same disclosure: a
+ *   `+N more (hub cap)` placeholder per ring-2 column plus the stats hidden count.
+ *   When EVERY neighbor fetch fails, the note `ring 2 unavailable — neighbor
+ *   fetches failed` pins — an empty ring 2 is never silent. depthUp past MAX
+ *   pins the disclosed note `depth capped at 2 — node budget`; any payload swap
+ *   (re-center / refresh / history pop) resets depth to 1.
  * - The graph viewport is NEVER < 40 cols: panels are suppressed first and the
  *   command-bar note discloses it (compact-mode inspector overlay ⇒ the route
  *   replaces the canvas instead of splitting).
@@ -144,6 +149,10 @@ const DEFAULT_DIMS: Dims = { width: 80, height: 24 };
 /** Pinned note for depthUp at MAX_DEPTH — the node budget is the ceiling, no ring 3. */
 const DEPTH_CAP_NOTE = "depth capped at 2 — node budget";
 
+/** Pinned note when EVERY ring-1 neighbor fetch fails at depthUp — an empty ring 2
+ *  is a fetch failure, not an honest empty graph; never silent. */
+const RING2_FAIL_NOTE = "ring 2 unavailable — neighbor fetches failed";
+
 const COMMAND_BAR: readonly { key: string; label: string }[] = [
   { key: "1", label: "Trace callers" },
   { key: "2", label: "Source" },
@@ -224,6 +233,16 @@ function budgetCard(side: "left" | "right", n: number, parentRef: string): IdeCa
   return { ref: `+budget:${side}`, name: text, category: "", file: "", startLine: 0, risk: "low", fanIn: 0, fanOut: 0, placeholder: text, parentRef };
 }
 
+/** `+N more (hub cap)` disclosure for far-side nodes the rpc's per-side cap dropped
+ *  before the model ever saw them — counted from the neighbor payload's exact
+ *  `totalCallers`/`totalCallees`; `parentRef` routes its dashed edge to the first
+ *  truncated parent. Distinct from the budget card: hub caps bite even when the
+ *  budget never does. */
+function hubCard(side: "left" | "right", n: number, parentRef: string): IdeCard {
+  const text = `+${n} more (hub cap)`;
+  return { ref: `+hubcap:${side}`, name: text, category: "", file: "", startLine: 0, risk: "low", fanIn: 0, fanOut: 0, placeholder: text, parentRef };
+}
+
 const isSynthetic = (ref: string): boolean => ref.startsWith("+");
 
 /** Miss rendering in the ego model's exact voice (renderMatches + the M3 branches). */
@@ -299,8 +318,9 @@ export function createIdeModel(deps: {
   let sourceSeq = 0;
   /** Current ring distance shown: 1 (callers/center/callees) or 2 (+ far-side rings). */
   let depth = 1;
-  /** Depth-2 expansion state: far-side cards per ring-2 column + budget-skipped counts. */
-  let ring2: { left: IdeCard[]; right: IdeCard[]; skippedLeft: number; skippedRight: number } | undefined;
+  /** Depth-2 expansion state: far-side cards per ring-2 column + budget-skipped and
+   *  hub-cap-hidden counts (per side) for the stats disclosure. */
+  let ring2: { left: IdeCard[]; right: IdeCard[]; skippedLeft: number; skippedRight: number; hubHiddenLeft: number; hubHiddenRight: number } | undefined;
   /** Per-ref cache of ring-1 neighbor payloads (success shapes only — errors never
    *   cache) — depthDown → depthUp re-fetches nothing. Cleared on every payload swap
    *  (re-center) along with the depth reset. */
@@ -359,10 +379,12 @@ export function createIdeModel(deps: {
     if (data === undefined) return 0;
     return (
       data.totalCallers -
-      data.callers.length +
-      (data.totalCallees - data.callees.length) +
-      (ring2?.skippedLeft ?? 0) +
-      (ring2?.skippedRight ?? 0)
+        data.callers.length +
+        (data.totalCallees - data.callees.length) +
+        (ring2?.skippedLeft ?? 0) +
+        (ring2?.skippedRight ?? 0) +
+        (ring2?.hubHiddenLeft ?? 0) +
+        (ring2?.hubHiddenRight ?? 0)
     );
   }
 
@@ -562,13 +584,16 @@ export function createIdeModel(deps: {
   /** Pure build of the depth-2 ring columns from the neighbor payloads: each ring-2
    *  card carries its ring-1 `parentRef`; refs already present in ANY column dedupe
    *  (first-seen wins); the NODE_BUDGET stop skips the remainder and returns the
-   *  per-column counts + placeholder parents for disclosure. Cards group by parent
-   *  index (then code-unit ref) so children of the same parent stay contiguous. */
+   *  per-column counts + placeholder parents for disclosure. A consulted neighbor's
+   *  OWN far-side hub cap (rpc per-side limit — the payload's exact totals exceed the
+   *  list it carries) accumulates into per-side hub-hidden counts, disclosed the same
+   *  way. Cards group by parent index (then code-unit ref) so children of the same
+   *  parent stay contiguous. */
   function buildRing2(
     d: EgoGraphData,
     neighbors: { ref: string; far: "callers" | "callees" }[],
     payloads: (EgoGraphData | undefined)[],
-  ): { left: IdeCard[]; right: IdeCard[]; skippedLeft: number; skippedRight: number } {
+  ): { left: IdeCard[]; right: IdeCard[]; skippedLeft: number; skippedRight: number; hubHiddenLeft: number; hubHiddenRight: number } {
     const seen = new Set<string>([d.center.ref]);
     for (const n of d.callers) seen.add(n.ref);
     for (const n of d.callees) seen.add(n.ref);
@@ -579,12 +604,27 @@ export function createIdeModel(deps: {
     let skippedRight = 0;
     let budgetParentLeft: string | undefined; // parent of the first skipped candidate
     let budgetParentRight: string | undefined;
+    let hubHiddenLeft = 0; // far-side nodes the rpc's per-side cap dropped pre-model
+    let hubHiddenRight = 0;
+    let hubParentLeft: string | undefined; // parent of the first truncated far side
+    let hubParentRight: string | undefined;
     for (let i = 0; i < neighbors.length; i++) {
       const nb = neighbors[i];
       if (nb === undefined) continue;
       const payload = payloads[i];
       if (payload === undefined) continue; // failed neighbor fetch: no far side to draw
-      for (const n of nb.far === "callers" ? payload.callers : payload.callees) {
+      const far = nb.far === "callers" ? payload.callers : payload.callees;
+      const hidden = (nb.far === "callers" ? payload.totalCallers : payload.totalCallees) - far.length;
+      if (hidden > 0) {
+        if (nb.far === "callers") {
+          hubHiddenLeft += hidden;
+          hubParentLeft ??= nb.ref;
+        } else {
+          hubHiddenRight += hidden;
+          hubParentRight ??= nb.ref;
+        }
+      }
+      for (const n of far) {
         if (seen.has(n.ref)) continue; // already present in any column — first-seen wins
         if (real >= NODE_BUDGET) {
           if (nb.far === "callers") {
@@ -613,13 +653,17 @@ export function createIdeModel(deps: {
     const groupedRight = groupByParent(right, d.callees);
     if (skippedLeft > 0 && budgetParentLeft !== undefined) groupedLeft.push(budgetCard("left", skippedLeft, budgetParentLeft));
     if (skippedRight > 0 && budgetParentRight !== undefined) groupedRight.push(budgetCard("right", skippedRight, budgetParentRight));
-    return { left: groupedLeft, right: groupedRight, skippedLeft, skippedRight };
+    if (hubHiddenLeft > 0 && hubParentLeft !== undefined) groupedLeft.push(hubCard("left", hubHiddenLeft, hubParentLeft));
+    if (hubHiddenRight > 0 && hubParentRight !== undefined) groupedRight.push(hubCard("right", hubHiddenRight, hubParentRight));
+    return { left: groupedLeft, right: groupedRight, skippedLeft, skippedRight, hubHiddenLeft, hubHiddenRight };
   }
 
   /** depthUp: 1 → 2. Fetches every shown ring-1 neighbor's ego graph in parallel
    *  (code-unit order, per-ref cache) and builds ring-2 columns from each neighbor's
    *  FAR side (callers of callers / callees of callees). loadSeq-guarded like load();
-   *  at MAX_DEPTH it only pins the cap note — never a third ring. */
+   *  at MAX_DEPTH it only pins the cap note — never a third ring. When EVERY
+   *  neighbor fetch fails, the ring-2 failure note pins instead of passing silently
+   *  as an empty ring 2. */
   async function expandDepth(): Promise<void> {
     if (data === undefined) return;
     if (depth >= MAX_DEPTH) {
@@ -651,7 +695,9 @@ export function createIdeModel(deps: {
     const prevParent = columns.flatMap((c) => c.cards).find((card) => card.ref === prevSelected)?.parentRef;
     ring2 = buildRing2(d, neighbors, payloads);
     depth = MAX_DEPTH;
-    actionNote = undefined;
+    // neighbors existed but NONE answered: an empty ring 2 would read as honest
+    // emptiness — disclose the failure instead
+    actionNote = neighbors.length > 0 && payloads.every((p) => p === undefined) ? RING2_FAIL_NOTE : undefined;
     buildColumns();
     restoreSelection([prevSelected, prevParent]);
     repaint();
