@@ -10,9 +10,12 @@ import { resolveRef } from "./tools/resolve-ref.js";
 import { riskBucket, riskExplain, type RiskFacts } from "./view/risk.js";
 import { buildPaletteIndex, type PaletteIndex } from "./view/palette-index.js";
 import type { GraphNode } from "./graph/types.js";
+import { readFile } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
 import type { EgoNeighbor } from "../rpc/index.js";
 import type {
   EgoGraphPayload,
+  EgoSourcePayload,
   FileSummary,
   FilesPayload,
   FileSymbolsPayload,
@@ -120,15 +123,38 @@ function symbolSummary(handle: GraphHandle, node: GraphNode): SymbolSummary {
 /** Max neighbors per side in an egoGraph payload — the view caps, the totals disclose. */
 export const EGO_CAP = 15;
 
+/** Signature clip for ego boxes (the box row is ~14-21 chars; 48 is the payload bound,
+ *  the view's fit() clips further). */
+const EGO_SIG_CLIP = 48;
+/** Sink badges carried per ego node; the full count rides `sinksTotal`. */
+const EGO_SINKS_CAP = 4;
+/** Lines in a lazy egoSource preview — a peek, not a dump. */
+export const EGO_SOURCE_LINES = 10;
+
+function clip(value: string, max: number): string {
+  return value.length > max ? value.slice(0, max - 1) + "…" : value;
+}
+
 /** One ego-graph node. File neighbors aggregate their symbols' facts (same source as the
  *  file map — parity with nodeDetail's File branch, final review I1). */
 function egoNeighbor(handle: GraphHandle, node: GraphNode): EgoNeighbor {
+  const facts = node.kind === "File" ? fileFacts(handle, node) : factsFor(handle, node);
+  const dangerous = node.dangerousCalls ?? [];
   return {
     ref: node.qualifiedName,
     kind: node.kind as "Function" | "Class" | "File",
-    riskBucket: riskBucket(node.kind === "File" ? fileFacts(handle, node) : factsFor(handle, node)),
+    riskBucket: riskBucket(facts),
     callers: handle.store.callers(node.id).length,
     callees: handle.store.callees(node.id).length,
+    signature: node.signature !== undefined ? clip(node.signature, EGO_SIG_CLIP) : undefined,
+    file: node.filePath,
+    startLine: node.span.start.line,
+    riskReason: riskExplain(facts).join(", "),
+    sinks: dangerous.slice(0, EGO_SINKS_CAP).map((d) => ({ name: d.name, count: d.count })),
+    sinksTotal: dangerous.length,
+    exported: node.exported,
+    language: node.language ?? "typescript",
+    unresolvedCount: handle.store.edgesFrom(node.id, "calls").filter((e) => e.unresolved === true).length,
   };
 }
 
@@ -235,6 +261,7 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
   nodeDetail: Handler<NodeDetailPayload>;
   paletteSearch: Handler<PaletteSearchPayload>;
   egoGraph: Handler<EgoGraphPayload>;
+  egoSource: Handler<EgoSourcePayload>;
 } {
   const resolveService =
     "resolve" in services ? (root: string | undefined) => services.resolve(root) : () => services as GraphService;
@@ -338,6 +365,52 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
           totalCallees: calleeNodes.length,
           unresolvedOut: handle.store.edgesFrom(center.id, "calls").filter((e) => e.unresolved === true).length,
         };
+      });
+    },
+
+    /** Lazy source preview (the ego screen's `i` overlay): signature + the first
+     *  EGO_SOURCE_LINES from the node's start line, read from DISK under the caller's
+     *  root — the graph is the ref index, the filesystem is the source of truth. The
+     *  root stays schema-optional like every method, but the disk read needs one: a
+     *  no-root call degrades to the typed unavailable, never a wrong-directory read. */
+    async egoSource(input, _ctx) {
+      const root = optionalStringField(input, "root");
+      if (root === undefined) {
+        return { error: "unavailable", message: "egoSource requires a root — the TUI always sends one" };
+      }
+      return guard(input, async (handle) => {
+        const resolution = resolveRef(handle, stringField(input, "ref"));
+        if (resolution.node === undefined) {
+          // the SAME not-found shape egoGraph/nodeDetail build — one miss contract
+          return {
+            ...provenance(handle),
+            error: "not-found" as const,
+            ambiguous: resolution.ambiguous,
+            suggestions: resolution.candidates.map((n) => n.qualifiedName),
+          };
+        }
+        const node = resolution.node;
+        // path-escape belt: node.filePath comes from the index (repo-relative), but a
+        // hand-built or future-watcher store must never read OUTSIDE the root
+        const abs = resolvePath(root, node.filePath);
+        if (abs !== resolvePath(root) && !abs.startsWith(resolvePath(root) + "/")) {
+          return { error: "unavailable", message: `source outside root: ${node.filePath}` };
+        }
+        try {
+          const content = await readFile(abs, "utf8");
+          const all = content.split("\n");
+          const start = Math.max(0, Math.min(node.span.start.line - 1, all.length));
+          return {
+            ...provenance(handle),
+            ref: node.qualifiedName,
+            ...(node.signature !== undefined ? { signature: node.signature } : {}),
+            file: node.filePath,
+            startLine: node.span.start.line,
+            lines: all.slice(start, start + EGO_SOURCE_LINES),
+          };
+        } catch {
+          return { error: "unavailable", message: `source unreadable: ${node.filePath}` };
+        }
       });
     },
   };

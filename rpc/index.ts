@@ -62,13 +62,25 @@ export interface PaletteMatch {
 }
 
 /** One node of the ego graph: the center or a direct neighbor. `callers`/`callees`
- *  are the neighbor's own direct resolved counts — context for the re-center choice. */
+ *  ARE the fan-in/fan-out counts — context for the re-center choice. The enrichment
+ *  fields (box-enrichment iteration) answer the reviewer's five questions per box,
+ *  every one bounded: one-line reason, clipped signature, ≤4 sink badges — never a
+ *  raw body (egoSource is the pointer). */
 export interface EgoNeighbor {
   ref: string;              // qualifiedName, e.g. "src/service/user.ts#UserService.greet"
   kind: "Function" | "Class" | "File";
   riskBucket: RiskBucket;
-  callers: number;
-  callees: number;
+  callers: number;          // fan-in: direct resolved callers
+  callees: number;          // fan-out: direct resolved callees
+  signature?: string;       // node signature clipped to ~48 chars (functions only)
+  file: string;             // repo-relative file path
+  startLine: number;        // node span start — the file:line answer
+  riskReason: string;       // the riskExplain line — WHY it was flagged
+  sinks: { name: string; count: number }[]; // dangerous calls, ≤4 (names + per-sink count)
+  sinksTotal: number;       // full dangerousCalls count when the badge list is capped
+  exported: boolean;
+  language: string;         // "typescript" | pack ids — the file-map column source
+  unresolvedCount: number;  // the node's own unresolved outgoing calls (honesty meter)
 }
 
 export interface EgoGraphData extends Provenance {
@@ -80,11 +92,22 @@ export interface EgoGraphData extends Provenance {
   unresolvedOut: number;    // center's unresolved+external outgoing calls (summary line)
 }
 
+/** Lazy source preview (the `i` overlay): signature + the first ~10 lines of the
+ *  node's source, read from disk under the caller's root. Never rides egoGraph. */
+export interface EgoSourceData extends Provenance {
+  ref: string;
+  signature?: string;
+  file: string;
+  startLine: number;
+  lines: string[];
+}
+
 export type FilesPayload = (Provenance & { files: FileSummary[] }) | UnavailablePayload;
 export type FileSymbolsPayload = (Provenance & { symbols: SymbolSummary[] }) | UnavailablePayload;
 export type NodeDetailPayload = (Provenance & NodeDetail) | NotFoundPayload | UnavailablePayload;
 export type PaletteSearchPayload = (Provenance & { matches: PaletteMatch[] }) | UnavailablePayload;
 export type EgoGraphPayload = EgoGraphData | NotFoundPayload | UnavailablePayload;
+export type EgoSourcePayload = EgoSourceData | NotFoundPayload | UnavailablePayload;
 
 const object = { type: "object" } as const;
 
@@ -125,6 +148,15 @@ export const closegraphRpc = {
       output: object,
     },
     egoGraph: {
+      input: {
+        type: "object",
+        properties: { ref: { type: "string" }, ...rootProperty },
+        required: ["ref"],
+        additionalProperties: false,
+      },
+      output: object,
+    },
+    egoSource: {
       input: {
         type: "object",
         properties: { ref: { type: "string" }, ...rootProperty },
