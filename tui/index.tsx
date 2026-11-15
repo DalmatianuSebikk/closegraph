@@ -926,6 +926,9 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     const d = dims()
     model().resize({ width: d.width, height: d.height })
     loadIde(model())
+    // bare /closegraph: no initial ref ⇒ the model pins its pick-a-symbol miss
+    // (zero rpc) and the route opens the symbol picker straight over it
+    if (props.initialRef === undefined || props.initialRef.trim() === "") openPalette()
   })
 
   // terminal resize re-windows the model without refetches (Review Focus 2 pattern)
@@ -1186,8 +1189,25 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   const HeaderView = (headerProps: { s: IdeState }) => (
     <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
       <box flexDirection="row" height={1} flexShrink={0}>
+        {/* back affordance: history pop when the center history is non-empty, else
+            the esc-family quit destination; the breadcrumb shifts right 2 cols */}
+        <text
+          height={1}
+          fg={IDE_THEME.cyan}
+          onMouseDown={() => {
+            if (ideState().historyDepth > 0) {
+              model().dispatch("backCenter")
+              sync()
+              settleIde()
+            } else {
+              context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
+            }
+          }}
+        >
+          {" ← "}
+        </text>
         <text height={1} attributes={TextAttributes.BOLD} fg={IDE_THEME.cyan}>
-          {` ${headerProps.s.header.breadcrumb}`}
+          {headerProps.s.header.breadcrumb}
         </text>
         <text height={1} fg={IDE_THEME.textMuted}>
           {headerRepoLabel(headerProps.s) === "" ? "" : `  ${headerRepoLabel(headerProps.s)}`}
@@ -1352,7 +1372,7 @@ export default Plugin.define({
     })
     // codegraph-ide-screen plan Task 4: the IDE screen is an ADDITIVE sibling page —
     // the graph route above is untouched. An optional ref argument pre-selects the
-    // center (`/codegraph src/a.ts#f`).
+    // center (`/closegraph src/a.ts#f`); a bare `/closegraph` opens the symbol picker.
     const unregisterIde = context.ui.router.register({
       name: "codegraph",
       render: (input) => <CodegraphIdeRoute initialRef={typeof input.data?.ref === "string" ? input.data.ref : undefined} />,
@@ -1366,7 +1386,7 @@ export default Plugin.define({
           title: "Open CodeGraph",
           group: "CodeGraph",
           palette: true,
-          slash: { name: "closegraph" },
+          // no slash: /closegraph now opens the IDE (Task 1) — palette entry stays
           run: () => context.ui.router.navigate({ type: "plugin", name: "graph" }),
         },
         {
@@ -1374,7 +1394,7 @@ export default Plugin.define({
           title: "Open CodeGraph IDE",
           group: "CodeGraph",
           palette: true,
-          slash: { name: "codegraph", arguments: true },
+          slash: { name: "closegraph", arguments: true },
           run: (input) =>
             context.ui.router.navigate({ type: "plugin", name: "codegraph", data: input?.trim() ? { ref: input.trim() } : undefined }),
         },

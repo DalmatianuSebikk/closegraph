@@ -153,6 +153,12 @@ const DEPTH_CAP_NOTE = "depth capped at 2 — node budget";
  *  is a fetch failure, not an honest empty graph; never silent. */
 const RING2_FAIL_NOTE = "ring 2 unavailable — neighbor fetches failed";
 
+/** Pinned miss line for the empty-ref entry (bare /closegraph): the route opens the
+ *  symbol picker over this hint. Guarding BEFORE the rpc is also the fix for the
+ *  garbled `multiple matches — did you mean (5) for :` wording — an empty ref never
+ *  reaches missLines. */
+const EMPTY_REF_MISS = "pick a symbol — press / to search";
+
 const COMMAND_BAR: readonly { key: string; label: string }[] = [
   { key: "1", label: "Trace callers" },
   { key: "2", label: "Source" },
@@ -517,7 +523,20 @@ export function createIdeModel(deps: {
     void loadDetail(); // keyboard-only correctness: the center's inspector settles itself
   }
 
+  /** Empty-ref guard (load + refresh both funnel here): resolve immediately to the
+   *  picker hint — screen miss, banner none — and NEVER touch deps.egoGraph. */
+  function applyEmptyRef(): void {
+    loadSeq++; // kill any in-flight load (same semantics as backCenter)
+    banner = bannerNone();
+    screen = "miss";
+    miss = { lines: [{ text: EMPTY_REF_MISS, muted: true }] };
+  }
+
   async function load(): Promise<void> {
+    if (focusRef === "") {
+      applyEmptyRef();
+      return;
+    }
     const seq = ++loadSeq;
     try {
       const payload = await deps.egoGraph(focusRef);
