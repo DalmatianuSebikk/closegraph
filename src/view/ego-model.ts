@@ -120,6 +120,9 @@ export function createEgoModel(deps: {
   let dims: Dims = { ...DEFAULT_DIMS };
   let currentRef = deps.ref;
   let data: EgoGraphData | undefined;
+  /** Per-payload boxes kept from apply() (never re-parsed) — repaints re-run egoLayout
+   *  over these with the CURRENT selectedRef (~1 ms per spike E8 — fine per keystroke). */
+  let boxes: { center: EgoBox; callers: EgoBox[]; callees: EgoBox[] } | undefined;
   let fullCanvas: EgoCanvas | undefined;
   let banner: Banner = bannerNone();
   let mode: "graph" | "list" | "miss" = "graph";
@@ -171,11 +174,23 @@ export function createEgoModel(deps: {
     lines = out;
   }
 
+  /** Rebuild the canvas with the CURRENT cursor painted as the selection (Critical 1:
+   *  without this, h/j/k/l/clicks move an invisible cursor — the route renders seg
+   *  styles verbatim and never consumes cursorRef). Cheap: fixed geometry, ~1 ms. */
+  function repaint(): void {
+    if (boxes === undefined) {
+      fullCanvas = undefined;
+      return;
+    }
+    fullCanvas = egoLayout({ ...boxes, selectedRef: cursorRef() });
+  }
+
   function apply(payload: EgoGraphPayload, askedRef: string): void {
     if ("error" in payload) {
       if (payload.error === "unavailable") {
         banner = bannerUnavailable(payload.message);
         data = undefined;
+        boxes = undefined;
         fullCanvas = undefined;
         mode = "miss";
         lines = [];
@@ -186,6 +201,7 @@ export function createEgoModel(deps: {
       // not-found still carries Provenance (Ruling 13) — surface staleness here too.
       banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
       data = undefined;
+      boxes = undefined;
       fullCanvas = undefined;
       mode = "miss";
       lines = missLines(askedRef, payload.suggestions, payload.ambiguous);
@@ -196,14 +212,15 @@ export function createEgoModel(deps: {
     banner = payload.staleness === "unknown" ? bannerUnknownFreshness() : bannerNone();
     data = payload;
     currentRef = payload.center.ref; // canonical resolved name — refreshes re-fetch this
-    fullCanvas = egoLayout({
+    boxes = {
       center: toBox(payload.center),
       callers: payload.callers.map(toBox),
       callees: payload.callees.map(toBox),
-    });
+    };
     title = titleFor(currentRef, payload);
     mode = dims.width < egoMinWidth() ? "list" : "graph";
-    resetCursor();
+    resetCursor(); // cursor lands on the center BEFORE the first paint (it starts selected)
+    repaint();
     rebuildLines();
   }
 
@@ -270,6 +287,7 @@ export function createEgoModel(deps: {
       columnRows[cursor.col] = cursor.row;
       cursor = { col: target, row };
       columnRows[target] = row;
+      repaint(); // paint the moved selection (Critical 1)
     },
 
     /** Within-column movement: clamps at both ends, no wrap (deterministic). */
@@ -278,6 +296,7 @@ export function createEgoModel(deps: {
       if (len === 0) return;
       cursor.row = Math.max(0, Math.min(cursor.row + delta, len - 1));
       columnRows[cursor.col] = cursor.row;
+      repaint(); // paint the moved selection (Critical 1)
     },
 
     /** Click parity: select `ref`; if it is ALREADY highlighted (and not the center) → re-center. */
@@ -293,6 +312,7 @@ export function createEgoModel(deps: {
           columnRows[cursor.col] = cursor.row;
           cursor = { col: c, row: at };
           columnRows[c] = at;
+          repaint(); // paint the moved selection (Critical 1)
           return;
         }
       }

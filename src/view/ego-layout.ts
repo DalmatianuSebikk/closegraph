@@ -193,8 +193,19 @@ function paintBox(cells: (Cell | undefined)[][], box: EgoBox, top: number, left:
   const interiorGroup = id * 2 + 1;
   const border = (textValue: string): Cell => ({ text: textValue, ref: box.ref, group: borderGroup });
   // D4: risk/selection shading rides the INTERIOR only, never border characters.
+  // Selection keeps the gray bg but ADDS fg "black" on label/detail runs (sibling-view
+  // pattern, tui/index.tsx row views): medium's risk bg is ALSO gray, so bg alone
+  // cannot distinguish a selected box — black-on-gray can, on every bucket. The risk
+  // marker keeps its red fg either way (signal, not chrome).
   const bg = selected ? "gray" : RISK_SHADING[box.bucket].bg;
-  const interior = (textValue: string): Cell => ({ text: textValue, ...(bg !== undefined ? { bg } : {}), ref: box.ref, group: interiorGroup });
+  const selectedFg = selected ? "black" : undefined;
+  const interior = (textValue: string): Cell => ({
+    text: textValue,
+    ...(selectedFg !== undefined ? { fg: selectedFg } : {}),
+    ...(bg !== undefined ? { bg } : {}),
+    ref: box.ref,
+    group: interiorGroup,
+  });
 
   const labelLine = fit(box.marker + box.label, BOX_W - 2);
   const markerRun = box.marker === "" ? "" : labelLine.slice(0, box.marker.length);
