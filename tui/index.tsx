@@ -18,6 +18,7 @@ import {
   type IdeState,
 } from "../src/view/ide-model.js"
 import { IDE_THEME } from "../src/view/ide-theme.js"
+import { buildExplainPrompt, replyAfter, type AgentMessageLike, type DescribeInput } from "../src/view/ide-agent.js"
 import { toSegments, type IdeSegment } from "../src/view/ide-layout.js"
 import type {
   FilesPayload,
@@ -328,6 +329,83 @@ async function runAskAgent(context: ReturnType<typeof usePlugin>, prompt: string
   }
   context.ui.dialog.alert({ title: "Ask agent", message: `Paste this prompt in chat:\n\n${prompt}` })
   context.ui.toast.show({ message: "ask-agent: no session in this project — prompt shown in dialog", variant: "warning" })
+}
+
+/** Explain poll cadence/cap (Task 3): 500 ms ticks, 60 ticks = 30 s, then the
+ *  honest timeout rejection (surfaces as the model's error state, never a hang). */
+const DESCRIBE_POLL_MS = 500
+const DESCRIBE_POLL_MAX = 60
+
+/**
+ * Map the solid Data session messages onto the pure agent-bridge rows:
+ * user/assistant only, text parts joined, order preserved. Tolerant across host
+ * shapes — the 2.2.7 client types discriminate on `type` (user text rides
+ * `.text`, assistant text rides `.content[]`); older hosts carry
+ * `{ info: { role }, parts[] }`. An assistant row counts only once COMPLETED —
+ * a streaming reply never renders half-written.
+ */
+export function agentMessageRows(list: readonly unknown[]): AgentMessageLike[] {
+  const partsText = (parts: unknown): string =>
+    Array.isArray(parts)
+      ? parts
+          .filter((p): p is { type?: unknown; text?: unknown } => typeof p === "object" && p !== null)
+          .filter((p) => p.type === undefined || p.type === "text")
+          .map((p) => (typeof p.text === "string" ? p.text : ""))
+          .join("\n")
+      : ""
+  const rows: AgentMessageLike[] = []
+  for (const raw of list) {
+    if (typeof raw !== "object" || raw === null) continue
+    const m = raw as {
+      type?: unknown
+      text?: unknown
+      content?: unknown
+      parts?: unknown
+      info?: { role?: unknown }
+      time?: { completed?: unknown }
+    }
+    const role = typeof m.type === "string" ? m.type : typeof m.info?.role === "string" ? m.info.role : undefined
+    if (role === "user") {
+      rows.push({ role: "user", text: typeof m.text === "string" ? m.text : partsText(m.content ?? m.parts) })
+    } else if (role === "assistant") {
+      if (m.time !== undefined && typeof m.time.completed !== "number") continue // still streaming
+      rows.push({ role: "assistant", text: typeof m.text === "string" ? m.text : partsText(m.content ?? m.parts) })
+    }
+    // every other message kind (system/tool/skill/…) is filtered out
+  }
+  return rows
+}
+
+/**
+ * Explain-this execution (Task 3): resolve the project session with the SAME
+ * rules as ask-agent (a foreign project's session is never guessed), send the
+ * pure-module prompt, then poll the reactive message list for the reply matched
+ * to OUR prompt — the last user row carrying exactly the text we sent, then the
+ * first completed assistant row after it (Review Focus 4: never "last assistant
+ * text", never pre-existing history). Rejections surface as the model's error
+ * state.
+ */
+async function describeViaSession(context: ReturnType<typeof usePlugin>, input: DescribeInput): Promise<string> {
+  const sessionID = pickAskAgentSession(context.data.session.list(), context.location?.directory)
+  if (sessionID === undefined) throw new Error("no session in this project")
+  const text = buildExplainPrompt(input)
+  await context.client.session.prompt({ sessionID, text })
+  for (let poll = 0; poll < DESCRIBE_POLL_MAX; poll++) {
+    await new Promise((resolve) => setTimeout(resolve, DESCRIBE_POLL_MS))
+    const rows = agentMessageRows(context.data.session.message.list(sessionID))
+    let userIndex = -1
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i]
+      if (row !== undefined && row.role === "user" && row.text === text) {
+        userIndex = i
+        break
+      }
+    }
+    if (userIndex === -1) continue // our user message hasn't landed in the store yet
+    const reply = replyAfter(rows, userIndex)
+    if (reply !== undefined) return reply
+  }
+  throw new Error("explain timed out")
 }
 
 function CodeGraphRoute() {
@@ -915,6 +993,15 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       egoGraph: egoGraphViaRpc(context.client, sessionRoot),
       nodeDetail: nodeDetailViaRpc(context.client, sessionRoot),
       egoSource: egoSourceViaRpc(context.client, sessionRoot),
+      // Task 3: the agent bridge dep. The repaint hops one macrotask past the
+      // promise settlement so the MODEL's own resolution handler (a microtask
+      // on this same promise) has stored the cache entry before sync() reads it.
+      describe: (input: DescribeInput) => {
+        const pending = describeViaSession(context, input)
+        const repaint = () => setTimeout(sync, 0)
+        void pending.then(repaint, repaint)
+        return pending
+      },
     })
 
   const [model, setModel] = createSignal(makeModel(props.initialRef ?? ""))
