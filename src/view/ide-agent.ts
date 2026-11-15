@@ -57,3 +57,37 @@ export function replyAfter(messages: AgentMessageLike[], userIndex: number): str
   }
   return undefined;
 }
+
+// --- Task 4: chat sidebar -----------------------------------------------------
+
+/** The transcript renders at most this many turns; the hidden older tail is
+ *  disclosed by the model's `earlier` count (a `+N earlier` line), never silent. */
+export const CHAT_TURN_CAP = 50;
+
+/** One rendered chat turn. `muted` marks LOCAL notes (degrade paths, missing
+ *  graph context) — honest client-side lines, never session content. */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  text: string;
+  muted?: boolean;
+}
+
+/** Session rows → transcript turns: user/assistant only, order preserved, blank
+ *  rows dropped (a tool-call-only assistant row is never an empty bubble). */
+export function extractChatTurns(messages: AgentMessageLike[]): ChatTurn[] {
+  const turns: ChatTurn[] = [];
+  for (const m of messages) {
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    if (m.text.trim() === "") continue;
+    turns.push({ role: m.role, text: m.text });
+  }
+  return turns;
+}
+
+/** Pinned context prefix: prepended to the raw input text on send so the agent
+ *  knows which card the question is about. The signature rides only when it
+ *  exists — never invented. Callers with a synthetic/empty focus skip this
+ *  entirely (raw text + the model's `no graph context` note). */
+export function buildChatContextPrefix(input: { ref: string; signature?: string }): string {
+  return `[graph focus: ${input.ref}${input.signature !== undefined ? ` — ${input.signature}` : ""}]\n`;
+}

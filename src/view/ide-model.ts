@@ -42,7 +42,7 @@ import type {
 import type { GraphNode } from "../graph/types.js";
 import { renderMatches } from "../tools/resolve-ref.js";
 import { bannerNone, bannerUnavailable, bannerUnknownFreshness, type Banner } from "./banner.js";
-import type { DescribeInput } from "./ide-agent.js";
+import { buildChatContextPrefix, CHAT_TURN_CAP, type ChatTurn, type DescribeInput } from "./ide-agent.js";
 import type { Dims } from "./file-map-model.js";
 import { HISTORY_CAP, LIST_CAP } from "./ego-model.js";
 import { IDE_THEME, categoryColor, categoryOf } from "./ide-theme.js";
@@ -73,14 +73,14 @@ export type IdeAction =
   | "depthUp" | "depthDown" | "fit" | "center" | "toggleInspector" | "toggleMinimap" | "toggleSidebar"
   | "help" | "back" | "backCenter" | "refresh"
   | "command1" | "command2" | "command3" | "command4" | "command5" | "command6"
-  | "explain";
+  | "explain" | "chat";
 
 export const IDE_ACTIONS: readonly IdeAction[] = [
   "left", "right", "up", "down", "open", "collapse", "cyclePanel", "search",
   "depthUp", "depthDown", "fit", "center", "toggleInspector", "toggleMinimap", "toggleSidebar",
   "help", "back", "backCenter", "refresh",
   "command1", "command2", "command3", "command4", "command5", "command6",
-  "explain",
+  "explain", "chat",
 ];
 
 export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
@@ -112,6 +112,9 @@ export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
   command6: ["6"],
   /** command6 ≡ explain — the same handler; [6] lights in the command bar. */
   explain: ["e"],
+  /** Task 4: t toggles the chat sidebar (talk). While open the route captures
+   *  keys palette-style; t with an EMPTY draft (or esc) closes it again. */
+  chat: ["t"],
 };
 
 export interface InspectorSection {
@@ -140,6 +143,12 @@ export interface IdeState {
   canvas?: { rows: IdeSegment[][]; width: number }; // viewport-clipped
   inspector?: { title: string; sections: InspectorSection[]; scroll: number; height: number };
   commandBar: { actions: { key: string; label: string; active: boolean }[]; note?: string };
+  /** Task 4 chat sidebar: present while open. `turns` is the capped tail
+   *  (CHAT_TURN_CAP) of local echoes merged BEFORE session turns; `earlier`
+   *  discloses the hidden older count; `scroll` is lines scrolled up from the
+   *  bottom (0 = pinned to latest). Closing the panel NEVER clears it — only
+   *  the model's lifetime ends the transcript. */
+  chat?: { turns: ChatTurn[]; earlier: number; input: string; scroll: number; status: "idle" | "sending" };
   help?: IdeHelpSection[];
   miss?: { lines: { text: string; muted?: boolean }[] };
   selectedRef?: string;
@@ -178,6 +187,11 @@ const DESCRIBE_FAILED_NOTE = "explain failed";
 const AGENT_UNAVAILABLE_NOTE = "agent unavailable";
 /** Ready text soft-wraps to the inspector's inner width (INSPECTOR_W - 4 = 35). */
 const DESCRIBE_WRAP_W = INSPECTOR_W - 4;
+
+/** Task 4 chat pinned wording: the narrow-mode disclosure (the inspector-replaces-
+ *  canvas family) and the honest local notes (never session content). */
+const CHAT_REPLACES_CANVAS_NOTE = `chat replaces canvas — viewport < ${MIN_VIEWPORT_W} cols`;
+const CHAT_NO_CONTEXT_NOTE = "no graph context";
 
 /** One cached explain entry per ref; survives payload swaps (keyed by ref). The
  *  error entry keeps the rejection's message so the section can disclose the
@@ -387,6 +401,18 @@ export function createIdeModel(deps: {
    *  shot per ref per session (a cached error is not auto-retried). */
   const describeCache = new Map<string, DescribeEntry>();
   let describeSeq = 0;
+  /** Task 4 chat sidebar. The transcript is chat-only: apply() (re-center /
+   *  refresh / history pop) NEVER touches it — only the model's lifetime ends
+   *  it. localEchoes (focus-command echoes + muted degrade notes) live only
+   *  client-side and merge BEFORE the session turns (pinned). */
+  let chatOpen = false;
+  let chatInput = "";
+  let chatScrollPos = 0; // lines scrolled up from the bottom (0 = pinned to latest)
+  let chatStatus: "idle" | "sending" = "idle";
+  let sessionTurns: ChatTurn[] = [];
+  let localEchoes: ChatTurn[] = [];
+  let chatTurns: ChatTurn[] = [];
+  let chatEarlier = 0;
 
   function viewportHeight(): number {
     return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS);
@@ -409,7 +435,9 @@ export function createIdeModel(deps: {
     const mode = modeFor(dims.width);
     let showSidebar = mode === "full" && !sidebarOff;
     let showInspector = (mode === "full" || mode === "no-sidebar") && !inspectorOff;
-    const overlay = (mode === "no-panels" || mode === "compact") && inspectorOverlay;
+    // Task 4: an open chat rides the SAME overlay path as the inspector in the
+    // narrow modes (the route swaps the canvas for it, never squeezes < 40 cols)
+    const overlay = (mode === "no-panels" || mode === "compact") && (inspectorOverlay || chatOpen);
     let vw =
       dims.width - (showSidebar ? SIDEBAR_W + SEPARATOR_W : 0) - (showInspector ? INSPECTOR_W + SEPARATOR_W : 0);
     let suppressedNote: string | undefined;
@@ -427,7 +455,9 @@ export function createIdeModel(deps: {
       if (dims.width - INSPECTOR_W >= MIN_VIEWPORT_W) {
         vw = dims.width - INSPECTOR_W;
       } else {
-        suppressedNote = `inspector replaces canvas — viewport < ${MIN_VIEWPORT_W} cols`;
+        // chat wins the wording when both overlays are somehow open — it is the
+        // one the route actually renders
+        suppressedNote = chatOpen ? CHAT_REPLACES_CANVAS_NOTE : `inspector replaces canvas — viewport < ${MIN_VIEWPORT_W} cols`;
       }
     }
     return { mode, showSidebar, showInspector, overlay, vw, ...(suppressedNote !== undefined ? { suppressedNote } : {}) };
@@ -1187,6 +1217,95 @@ export function createIdeModel(deps: {
     };
   }
 
+  // --- Task 4: chat sidebar (all pure; the route owns session wiring) ---------
+
+  /** Merged transcript = local echoes BEFORE session turns (pinned), capped to
+   *  the CHAT_TURN_CAP tail with the hidden count disclosed in `earlier`. */
+  function rebuildChatTurns(): void {
+    const merged = [...localEchoes, ...sessionTurns];
+    chatEarlier = Math.max(0, merged.length - CHAT_TURN_CAP);
+    chatTurns = merged.slice(chatEarlier);
+  }
+
+  /** Route-driven session sync (reactive message.list effect + send settle).
+   *  `sending` drops only once the LATEST session turn is the assistant's — a
+   *  landed user echo means the reply is still in flight. */
+  function syncChat(turns: ChatTurn[]): void {
+    sessionTurns = turns;
+    rebuildChatTurns();
+    if (chatStatus === "sending" && sessionTurns.at(-1)?.role === "assistant") chatStatus = "idle";
+  }
+
+  function chatType(ch: string): void {
+    chatInput += ch;
+  }
+
+  function chatBackspace(): void {
+    chatInput = chatInput.slice(0, -1);
+  }
+
+  function chatScroll(delta: number): void {
+    chatScrollPos = Math.max(0, chatScrollPos + delta); // the top clamp lives in state()
+  }
+
+  /** Enter. Three kinds: empty draft ⇒ undefined (the draft is kept); a
+   *  `focus <ref>` line ⇒ a client-side echo + a re-center result for the
+   *  route; anything else ⇒ a send result carrying the context-prefixed text.
+   *  Synthetic/empty focus NEVER prefixes (synthetic refs never reach the LLM)
+   *  — the raw text goes out with the honest `no graph context` note. */
+  function chatSubmit(): { kind: "focus"; ref: string } | { kind: "send"; text: string } | undefined {
+    const input = chatInput.trim();
+    if (input === "") return undefined;
+    chatInput = "";
+    if (input === "focus" || input.startsWith("focus ")) {
+      const ref = input.slice("focus".length).trim();
+      if (ref === "") return undefined; // `focus` with no ref: nothing to center on
+      localEchoes.push({ role: "user", text: input }); // focus echoes live only client-side
+      rebuildChatTurns();
+      return { kind: "focus", ref };
+    }
+    if (focusRef === "" || isSynthetic(focusRef)) {
+      localEchoes.push({ role: "assistant", text: CHAT_NO_CONTEXT_NOTE, muted: true });
+      rebuildChatTurns();
+      chatStatus = "sending";
+      return { kind: "send", text: input };
+    }
+    const signature = detail?.ref === focusRef ? detail.payload?.signature : undefined;
+    const text =
+      buildChatContextPrefix({ ref: focusRef, ...(signature !== undefined ? { signature } : {}) }) + input;
+    chatStatus = "sending";
+    return { kind: "send", text };
+  }
+
+  /** The route's degrade paths (no session, send failure): a muted local
+   *  assistant-style note + status back to idle — a chat send NEVER hangs. */
+  function chatNote(text: string): void {
+    localEchoes.push({ role: "assistant", text, muted: true });
+    chatStatus = "idle";
+    rebuildChatTurns();
+  }
+
+  function chatClose(): void {
+    chatOpen = false; // the transcript survives — closing never clears it
+  }
+
+  function chatState(): NonNullable<IdeState["chat"]> {
+    // clamp the scroll against the flattened transcript height: one row per
+    // newline-split line + the `+N earlier` disclosure; body rows = viewport
+    // minus the chat header and the input line
+    const lines = chatTurns.reduce((n, t) => n + t.text.split("\n").length, 0) + (chatEarlier > 0 ? 1 : 0);
+    const body = Math.max(1, viewportHeight() - 2);
+    chatScrollPos = Math.min(chatScrollPos, Math.max(0, lines - body));
+    return {
+      turns: chatTurns.map((t) => ({ ...t })),
+      earlier: chatEarlier,
+      input: chatInput,
+      scroll: chatScrollPos,
+      status: chatStatus,
+    };
+  }
+
+
   function state(): IdeState {
     const lay = panelLayout();
     const vh = viewportHeight();
@@ -1197,6 +1316,7 @@ export function createIdeModel(deps: {
       banner,
       commandBar: commandBarState(note),
       ...(helpOpen ? { help: HELP_SECTIONS.map((s) => ({ title: s.title, lines: [...s.lines] })) } : {}),
+      ...(chatOpen ? { chat: chatState() } : {}),
       focusRef,
       depth,
       historyDepth: history.length,
@@ -1417,6 +1537,13 @@ export function createIdeModel(deps: {
         case "explain":
           explain();
           break;
+        case "chat":
+          if (chatOpen) chatClose();
+          else {
+            chatOpen = true;
+            chatScrollPos = 0; // reopen pinned to the latest turn
+          }
+          break;
       }
     },
 
@@ -1449,6 +1576,16 @@ export function createIdeModel(deps: {
     inspectorScroll(delta: number): void {
       inspScroll = Math.max(0, inspScroll + delta);
     },
+
+    // Task 4 chat sidebar: the route drives every method from its key-capture
+    // branch; the model stays pure (no OpenTUI, no session client).
+    syncChat,
+    chatType,
+    chatBackspace,
+    chatScroll,
+    chatSubmit,
+    chatNote,
+    chatClose,
 
     state,
 
