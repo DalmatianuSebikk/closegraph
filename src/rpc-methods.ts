@@ -146,7 +146,11 @@ function egoNeighbor(handle: GraphHandle, node: GraphNode): EgoNeighbor {
     riskBucket: riskBucket(facts),
     callers: handle.store.callers(node.id).length,
     callees: handle.store.callees(node.id).length,
-    signature: node.signature !== undefined ? clip(node.signature, EGO_SIG_CLIP) : undefined,
+    // NOTE: keys with undefined values are OMITTED, never emitted — the opencode host
+    // JSON-validates rpc outputs and rejects undefined-valued keys (live 500:
+    // rpc.invalid_output "Expected JSON value"). Pack nodes (bash/python/php) have no
+    // signature; plain JSON.stringify would hide this, the host does not.
+    ...(node.signature !== undefined ? { signature: clip(node.signature, EGO_SIG_CLIP) } : {}),
     file: node.filePath,
     startLine: node.span.start.line,
     riskReason: riskExplain(facts).join(", "),
@@ -316,7 +320,9 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
         return {
           ...provenance(handle),
           node,
-          signature: node.signature,
+          // OMITTED when absent (never undefined-valued) — the host's output JSON
+          // validation rejects undefined keys; pack nodes carry no signature
+          ...(node.signature !== undefined ? { signature: node.signature } : {}),
           callers: handle.store.callers(node.id).map((n) => n.qualifiedName).sort(),
           callees: handle.store.callees(node.id).map((n) => n.qualifiedName).sort(),
           unresolvedCount: handle.store.edgesFrom(node.id, "calls").filter((e) => e.unresolved === true).length,
