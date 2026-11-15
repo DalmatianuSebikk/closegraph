@@ -59,8 +59,9 @@ export const EGO_KEYMAP: Record<EgoAction, readonly string[]> = {
 
 export const HISTORY_CAP = 50;
 
-/** Rendered actions footer — pinned text; bracket tokens mirror EGO_KEYMAP (esc rides Task 5's route). */
-export const EGO_ACTIONS_LINE = "[h/l] columns  [j/k] rows  [enter] re-center  [u] back a center  [r] refresh  [esc] back a screen";
+/** Rendered actions footer — pinned text. ≤ 78 chars so the [esc] exit hint survives
+ *  stock 80-col terminals (I3); bracket tokens mirror EGO_KEYMAP (esc rides Task 5's route). */
+export const EGO_ACTIONS_LINE = "[hjkl] move  [enter] re-center  [u] prev center  [r] refresh  [esc] back";
 
 /** List-view names per side — MUST mirror the rpc's EGO_CAP (src/rpc-methods.ts); pinned
  *  equal by test so drift breaks the build's test, not users. */
@@ -346,7 +347,11 @@ export function createEgoModel(deps: {
       let canvas: EgoCanvas | undefined;
       if (mode === "graph" && fullCanvas !== undefined) {
         const mid = selectedRowOf(cur);
-        const max = Math.max(1, dims.height - RESERVED_ROWS);
+        // dynamic row budget (M2/Minor 4): title + banner + footer chrome (RESERVED_ROWS)
+        // PLUS however many disclosure lines this payload renders (unresolvedOut /
+        // undrawnEdges live ABOVE the canvas) — a static 4 under-counts by a row when
+        // both lines show and clips the last canvas row.
+        const max = Math.max(1, dims.height - RESERVED_ROWS - lines.length);
         // top clamp to mid - 2 = the box's TOP row: the selected box never renders
         // half-clipped (label row cut off) when the cursor moves up; the bottom clamp
         // still guarantees the mid row stays visible in tiny windows (max < 3).
