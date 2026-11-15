@@ -113,6 +113,12 @@ export interface InspectorSection {
   lines: { text: string; fg?: string; ref?: string }[];
 }
 
+/** `?` overlay section: a cyan title row over plain body lines (pinned wording). */
+export interface IdeHelpSection {
+  title: string;
+  lines: string[];
+}
+
 export interface IdeState {
   mode: IdeMode;
   banner: Banner;
@@ -128,7 +134,7 @@ export interface IdeState {
   canvas?: { rows: IdeSegment[][]; width: number }; // viewport-clipped
   inspector?: { title: string; sections: InspectorSection[]; scroll: number; height: number };
   commandBar: { actions: { key: string; label: string; active: boolean }[]; note?: string };
-  help?: string[];
+  help?: IdeHelpSection[];
   miss?: { lines: { text: string; muted?: boolean }[] };
   selectedRef?: string;
   focusRef: string;
@@ -167,7 +173,7 @@ const COMMAND_BAR: readonly { key: string; label: string }[] = [
   { key: "5", label: "Expand" },
 ];
 
-const HELP_LINES: readonly string[] = [
+const HELP_KEYS_LINES: readonly string[] = [
   "IDE keys",
   "[h/l] switch column  [j/k] move within column",
   "[enter] recenter  [space] collapse/expand sides  [u] prev center",
@@ -175,6 +181,29 @@ const HELP_LINES: readonly string[] = [
   "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
   "[r] refresh  [esc] back  [?] close help",
+];
+
+/** `?` overlay sections — wording pinned (Task 2). Legend uses theme color NAMES
+ *  (CATEGORY_ORDER purple→amber, risk green/amber/coral), never hex values. */
+const HELP_SECTIONS: readonly { title: string; lines: readonly string[] }[] = [
+  { title: "KEYS", lines: HELP_KEYS_LINES },
+  {
+    title: "LEGEND",
+    lines: [
+      "card border color = category (purple coral green cyan amber · first path segment)",
+      "Risk: LOW green · MED amber · HIGH coral    → callers (muted) · → callees (cyan)",
+      "selected = coral border · ┄ dashed card = hidden-count placeholder",
+    ],
+  },
+  {
+    title: "HOW IT WORKS",
+    lines: [
+      "callers left · focus center · callees right  ([+]/[d] rings 1–2)",
+      "graph source: built | snapshot (staleness note when unknown)",
+      "+N more / hidden = real counts capped by budget or rpc cap — never silent",
+      "unresolved calls are a count line, never an edge",
+    ],
+  },
 ];
 
 /** Width → mode; boundaries are exact and inclusive (full ≥160 … list <68). */
@@ -1029,7 +1058,7 @@ export function createIdeModel(deps: {
       mode: lay.mode,
       banner,
       commandBar: commandBarState(note),
-      ...(helpOpen ? { help: [...HELP_LINES] } : {}),
+      ...(helpOpen ? { help: HELP_SECTIONS.map((s) => ({ title: s.title, lines: [...s.lines] })) } : {}),
       focusRef,
       depth,
       historyDepth: history.length,

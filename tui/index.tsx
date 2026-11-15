@@ -1168,23 +1168,37 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
-  const IdeHelpOverlay = (helpProps: { lines: string[] }) => (
-    <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
-      <text width="100%" height={1} flexShrink={0} fg="cyan">
-        {helpProps.lines[0] ?? "help"}
-      </text>
-      <box flexDirection="column" paddingTop={0} flexGrow={1}>
-        {...helpProps.lines.slice(1).map((line) => (
-          <text width="100%" height={1} flexShrink={0}>
-            {line === "" ? " " : line}
-          </text>
-        ))}
+  const IdeHelpOverlay = (helpProps: { sections: { title: string; lines: string[] }[] }) => {
+    // flat rows: section titles cyan, body lines default; no scroll — clip to the
+    // viewport with a pinned "…" bottom line when the sections don't fit
+    const flatRows = () => {
+      const rows: { text: string; title: boolean }[] = []
+      for (const sec of helpProps.sections) {
+        rows.push({ text: sec.title, title: true })
+        for (const line of sec.lines) rows.push({ text: line, title: false })
+      }
+      return rows
+    }
+    const rows = () => {
+      const all = flatRows()
+      const budget = dims().height - 1 // minus the "? or esc close" footer
+      return all.length > budget ? [...all.slice(0, Math.max(0, budget - 1)), { text: "…", title: false }] : all
+    }
+    return (
+      <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
+        <box flexDirection="column" paddingTop={0} flexGrow={1}>
+          {...rows().map((row) => (
+            <text width="100%" height={1} flexShrink={0} fg={row.title ? "cyan" : undefined}>
+              {row.text === "" ? " " : row.text}
+            </text>
+          ))}
+        </box>
+        <text width="100%" height={1} flexShrink={0} fg="gray">
+          {"? or esc close"}
+        </text>
       </box>
-      <text width="100%" height={1} flexShrink={0} fg="gray">
-        {"? or esc close"}
-      </text>
-    </box>
-  )
+    )
+  }
 
   const HeaderView = (headerProps: { s: IdeState }) => (
     <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
@@ -1311,7 +1325,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       {(() => {
         if (paletteState().open) return <IdePaletteOverlay />
         const s = ideState()
-        if (s.help !== undefined) return <IdeHelpOverlay lines={s.help} />
+        if (s.help !== undefined) return <IdeHelpOverlay sections={s.help} />
         // compact/no-panels inspector overlay ⇒ the inspector REPLACES the canvas
         // (the model's panelLayout doc ruling) instead of splitting a <40-col viewport
         const overlayInspector = s.inspector !== undefined && (s.mode === "no-panels" || s.mode === "compact")
