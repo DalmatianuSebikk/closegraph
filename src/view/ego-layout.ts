@@ -47,10 +47,24 @@ import { RISK_SHADING } from "./file-map-model.js";
 
 export interface EgoBox {
   ref: string;
-  /** line 1: node short name (truncated to fit boxW - 2, "…" convention) */
+  /** grouping key: neighbors sort by (file, ref) so same-file nodes stack adjacent */
+  file: string;
+  /** row 1: node short name (truncated to fit boxW - 2, "…" convention) */
   label: string;
-  /** line 2: file path + counts, truncated the same way; may be "" */
-  detail: string;
+  /** row 2 head: short kind badge (Fn | Cl | File) — the model maps the payload kind */
+  kind: string;
+  /** row 2 tail: signature (payload pre-clips to ~48); absent ⇒ `L${startLine}` */
+  signature?: string;
+  /** row 2 fallback when there is no signature (File/Class nodes) */
+  startLine: number;
+  /** row 3 tail: the riskExplain line — WHY this node was flagged (one line) */
+  riskReason: string;
+  /** row 4 head: pre-formatted sink badges ("eval ×2, exec ×1 +2"), may be "" */
+  sinks: string;
+  fanIn: number;
+  fanOut: number;
+  /** row 4: false ⇒ a `local ` prefix (the informative inverse — most nodes export) */
+  exported: boolean;
   /** RISK_SHADING marker ("" | "!" | "!!!") — rendered on the label line, fg red */
   marker: string;
   bucket: RiskBucket;
@@ -78,7 +92,8 @@ export interface EgoCanvas {
 
 export interface EgoLayoutInput {
   center: EgoBox;
-  /** already capped + code-unit sorted by the caller (Task 2 order) */
+  /** the MODEL supplies file-grouped order via each box's `file` key — egoLayout
+   *  re-sorts by (file, ref) itself so grouping holds for any caller (deterministic). */
   callers: EgoBox[];
   callees: EgoBox[];
   /** highlighted node — its box's interior segments get the selection bg */
@@ -91,8 +106,11 @@ export interface EgoLayoutInput {
 export const BOX_W = 16;
 /** width cap (38-char interior) — past this the canvas stops growing */
 export const BOX_W_MAX = 40;
-/** border top, 2 label rows, border bottom */
-export const BOX_H = 4;
+/** Taller info-rich boxes (enrichment iteration): border / name / kind+signature /
+ *  risk bucket+reason / sinks+fan-in·out / border — the reviewer's 5-question order. */
+export const BOX_H = 6;
+/** the box's mid row (the risk row) — edge anchors and the funnel live here */
+export const BOX_MID_ROW = Math.floor(BOX_H / 2);
 /** connector lanes between columns (2 lanes) */
 export const GUTTER_W = 4;
 /** the route's paddingLeft + paddingRight — the canvas must fit inside them (frozen tui fact) */
@@ -256,26 +274,34 @@ function paintBox(geo: Geometry, cells: (Cell | undefined)[][], box: EgoBox, top
   const labelLine = fit(box.marker + box.label, boxW - 2);
   const markerRun = box.marker === "" ? "" : labelLine.slice(0, box.marker.length);
   const labelRun = labelLine.slice(markerRun.length);
+  // rows 2-4: kind+signature / bucket+reason / sinks+fans — one fit() each (E3)
+  const bucketShort: Record<RiskBucket, string> = { low: "low", medium: "med", high: "high" };
+  const info2 = fit(`${box.kind} ${box.signature ?? `L${box.startLine}`}`, boxW - 2);
+  const info3 = fit(`${bucketShort[box.bucket]} ${box.riskReason}`, boxW - 2);
+  const info4 = fit(`${box.exported ? "" : "local "}${box.sinks}${box.sinks !== "" ? " " : ""}in${box.fanIn} out${box.fanOut}`, boxW - 2);
 
   const row = top;
   cells[row][left] = border("┌");
   for (let i = 1; i < boxW - 1; i++) cells[row][left + i] = border("─");
   cells[row][left + boxW - 1] = border("┐");
 
-  cells[row + 1][left] = border("│");
-  let x = left + 1;
-  for (const char of markerRun) cells[row + 1][x++] = { text: char, fg: "red", ...(bg !== undefined ? { bg } : {}), ref: box.ref, group: interiorGroup };
-  for (const char of labelRun) cells[row + 1][x++] = interior(char);
-  cells[row + 1][left + boxW - 1] = border("│");
+  const interiorRows = [labelLine, info2, info3, info4];
+  for (let r = 0; r < interiorRows.length; r++) {
+    const y = row + 1 + r;
+    cells[y][left] = border("│");
+    let x = left + 1;
+    if (r === 0) {
+      for (const char of markerRun) cells[y][x++] = { text: char, fg: "red", ...(bg !== undefined ? { bg } : {}), ref: box.ref, group: interiorGroup };
+      for (const char of labelRun) cells[y][x++] = interior(char);
+    } else {
+      for (const char of interiorRows[r]) cells[y][x++] = interior(char);
+    }
+    cells[y][left + boxW - 1] = border("│");
+  }
 
-  cells[row + 2][left] = border("│");
-  x = left + 1;
-  for (const char of fit(box.detail, boxW - 2)) cells[row + 2][x++] = interior(char);
-  cells[row + 2][left + boxW - 1] = border("│");
-
-  cells[row + 3][left] = border("└");
-  for (let i = 1; i < boxW - 1; i++) cells[row + 3][left + i] = border("─");
-  cells[row + 3][left + boxW - 1] = border("┘");
+  cells[row + BOX_H - 1][left] = border("└");
+  for (let i = 1; i < boxW - 1; i++) cells[row + BOX_H - 1][left + i] = border("─");
+  cells[row + BOX_H - 1][left + boxW - 1] = border("┘");
 }
 
 /** Route every neighbor edge of one side; returns the count of dropped edges. */
@@ -284,7 +310,7 @@ function routeSide(geo: Geometry, neighbors: EgoBox[], mid: number, side: "left"
   const width = geo.canvasW;
   let undrawn = 0;
   for (let i = 0; i < neighbors.length; i++) {
-    const anchor = i * (BOX_H + 1) + 2; // border mid-row = boxTop + 2 (the detail row)
+    const anchor = i * (BOX_H + 1) + BOX_MID_ROW; // the box's mid (risk) row
     let placed = false;
     for (const lane of [1, 2] as const) {
       const path = edgePath(geo, anchor, mid, lane, side);
@@ -325,20 +351,26 @@ function toSegments(cells: (Cell | undefined)[]): EgoSegment[] {
 export function egoLayout(input: EgoLayoutInput): EgoCanvas {
   const geo = geometryFor(input.width === undefined ? BOX_W : egoBoxWidth(input.width));
   const width = geo.canvasW;
-  const tallest = Math.max(columnHeight(input.callers.length), columnHeight(input.callees.length));
+  // FILE GROUPING (enrichment iteration, honest v1): same-file neighbors stack
+  // adjacent — sort by (file, ref); deterministic for any caller's input order.
+  const byFile = (a: EgoBox, b: EgoBox): number =>
+    a.file < b.file ? -1 : a.file > b.file ? 1 : a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0;
+  const callers = [...input.callers].sort(byFile);
+  const callees = [...input.callees].sort(byFile);
+  const tallest = Math.max(columnHeight(callers.length), columnHeight(callees.length));
   const centerY = Math.min(Math.floor(tallest / 2), Math.max(0, tallest - BOX_H));
-  const mid = centerY + 2; // the center box's border mid-row
+  const mid = centerY + BOX_MID_ROW; // the center box's mid row
   const height = Math.max(tallest, centerY + BOX_H);
 
-  const left = routeSide(geo, input.callers, mid, "left");
-  const right = routeSide(geo, input.callees, mid, "right");
+  const left = routeSide(geo, callers, mid, "left");
+  const right = routeSide(geo, callees, mid, "right");
   const undrawnEdges = left.undrawn + right.undrawn;
 
   const cells: (Cell | undefined)[][] = Array.from({ length: height }, () => Array<Cell | undefined>(width).fill(undefined));
 
   let boxId = 0;
-  input.callers.forEach((b, i) => paintBox(geo, cells, b, i * (BOX_H + 1), 0, b.ref === input.selectedRef, boxId++));
-  input.callees.forEach((b, i) => paintBox(geo, cells, b, i * (BOX_H + 1), geo.rightX, b.ref === input.selectedRef, boxId++));
+  callers.forEach((b, i) => paintBox(geo, cells, b, i * (BOX_H + 1), 0, b.ref === input.selectedRef, boxId++));
+  callees.forEach((b, i) => paintBox(geo, cells, b, i * (BOX_H + 1), geo.rightX, b.ref === input.selectedRef, boxId++));
   paintBox(geo, cells, input.center, centerY, geo.centerX, input.center.ref === input.selectedRef, boxId++);
 
   for (const [key, arms] of left.grid) cells[Math.floor(key / width)][key % width] = { text: GLYPHS[arms] ?? "·", fg: "gray" };

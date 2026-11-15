@@ -18,7 +18,7 @@
 import type { EgoGraphData, EgoGraphPayload, EgoNeighbor } from "../../rpc/index.js";
 import type { GraphNode } from "../graph/types.js";
 import { renderMatches } from "../tools/resolve-ref.js";
-import { egoLayout, egoMinWidth, EGO_PAD, type EgoBox, type EgoCanvas } from "./ego-layout.js";
+import { egoLayout, egoMinWidth, EGO_PAD, BOX_MID_ROW, type EgoBox, type EgoCanvas } from "./ego-layout.js";
 import { RISK_SHADING, type Dims } from "./file-map-model.js";
 import { bannerNone, bannerUnavailable, bannerUnknownFreshness, type Banner } from "./banner.js";
 
@@ -100,12 +100,21 @@ interface HistoryEntry {
 
 function toBox(n: EgoNeighbor): EgoBox {
   const hash = n.ref.lastIndexOf("#");
-  const file = hash === -1 ? n.ref : n.ref.slice(0, hash);
-  const label = hash === -1 ? file.slice(file.lastIndexOf("/") + 1) : n.ref.slice(hash + 1);
+  const label = hash === -1 ? n.file.slice(n.file.lastIndexOf("/") + 1) : n.ref.slice(hash + 1);
+  const badges = n.sinks.map((s) => (s.count > 1 ? `${s.name} ×${s.count}` : s.name)).join(", ");
   return {
     ref: n.ref,
+    file: n.file,
     label,
-    detail: `${file} c:${n.callers} e:${n.callees}`,
+    kind: n.kind === "Function" ? "Fn" : n.kind === "Class" ? "Cl" : "File",
+    ...(n.signature !== undefined ? { signature: n.signature } : {}),
+    startLine: n.startLine,
+    riskReason: n.riskReason,
+    // capped sink list discloses the remainder ("eval ×2, exec ×1 +2")
+    sinks: n.sinksTotal > n.sinks.length ? `${badges} +${n.sinksTotal - n.sinks.length}` : badges,
+    fanIn: n.callers,
+    fanOut: n.callees,
+    exported: n.exported,
     marker: RISK_SHADING[n.riskBucket].marker,
     bucket: n.riskBucket,
   };
@@ -258,7 +267,7 @@ export function createEgoModel(deps: {
     const target = ref ?? data?.center.ref;
     if (fullCanvas === undefined || target === undefined) return 0;
     for (let r = 0; r < fullCanvas.rows.length; r++) {
-      if (fullCanvas.rows[r].some((seg) => seg.ref === target)) return r + 2; // first row = box top; +2 = mid
+      if (fullCanvas.rows[r].some((seg) => seg.ref === target)) return r + BOX_MID_ROW; // first row = box top
     }
     return 0;
   }
@@ -380,10 +389,10 @@ export function createEgoModel(deps: {
         // undrawnEdges live ABOVE the canvas) — a static 4 under-counts by a row when
         // both lines show and clips the last canvas row.
         const max = Math.max(1, dims.height - RESERVED_ROWS - lines.length);
-        // top clamp to mid - 2 = the box's TOP row: the selected box never renders
-        // half-clipped (label row cut off) when the cursor moves up; the bottom clamp
-        // still guarantees the mid row stays visible in tiny windows (max < 3).
-        scroll = Math.max(0, Math.min(scroll, mid - 2));
+        // top clamp to mid - BOX_MID_ROW = the box's TOP row: the selected box never
+        // renders half-clipped when the cursor moves up; the bottom clamp still
+        // guarantees the mid row stays visible in tiny windows.
+        scroll = Math.max(0, Math.min(scroll, mid - BOX_MID_ROW));
         scroll = Math.max(scroll, mid - max + 1);
         const rows = fullCanvas.rows.slice(scroll, scroll + max);
         canvas = { rows, width: fullCanvas.width, height: rows.length, undrawnEdges: fullCanvas.undrawnEdges };
