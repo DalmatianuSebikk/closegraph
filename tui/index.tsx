@@ -1487,11 +1487,14 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   /** Task 5 ops overlay: the focused function's operations menu — the palette
    *  idiom (› cursor row, gray highlight, click to pick), titled by the focus
    *  ref so the target is never ambiguous. Full-screen overlay like help; the
-   *  harden row exists only when the focus has risk facts (the model's list). */
-  const IdeOpsOverlay = (opsProps: { ops: NonNullable<IdeState["ops"]>; ref: string }) => (
+   *  harden row exists only when the focus has risk facts (the model's list).
+   *  The prop is `focusRef`, NEVER `ref` — `ref` is a reserved Solid JSX prop
+   *  (the compiler forwards a ref callback, so `opsProps.ref` renders as
+   *  function source instead of the string; ux2 Task-6 harness defect). */
+  const IdeOpsOverlay = (opsProps: { ops: NonNullable<IdeState["ops"]>; focusRef: string }) => (
     <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
       <text width="100%" height={1} flexShrink={0} fg="cyan">
-        {`operations on ${opsProps.ref}`}
+        {`operations on ${opsProps.focusRef}`}
       </text>
       <box flexDirection="column" paddingTop={0} flexGrow={1}>
         {...opsProps.ops.items.map((item, i) => (
@@ -1690,7 +1693,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         if (s.help !== undefined) return <IdeHelpOverlay sections={s.help} />
         // Task 5: the ops overlay is a full-screen overlay alongside help — it
         // swallows keys and screen while open (the route branch above)
-        if (s.ops !== undefined) return <IdeOpsOverlay ops={s.ops} ref={s.focusRef} />
+        if (s.ops !== undefined) return <IdeOpsOverlay ops={s.ops} focusRef={s.focusRef} />
         // Task 4: an open chat rides the inspector-overlay path in the narrow
         // modes — it REPLACES the canvas (the model's `chat replaces canvas`
         // note family), never squeezes a <40-col viewport. In full/no-sidebar
