@@ -15,7 +15,7 @@
  * - Windowing follows the selection (RESERVED_ROWS chrome, same constant family
  *   as the other models); selection survives resizes by ref.
  */
-import type { EgoGraphData, EgoGraphPayload, EgoNeighbor } from "../../rpc/index.js";
+import type { EgoGraphData, EgoGraphPayload, EgoNeighbor, EgoSourcePayload } from "../../rpc/index.js";
 import type { GraphNode } from "../graph/types.js";
 import { renderMatches } from "../tools/resolve-ref.js";
 import { egoLayout, egoMinWidth, EGO_PAD, BOX_MID_ROW, type EgoBox, type EgoCanvas } from "./ego-layout.js";
@@ -42,9 +42,22 @@ export interface EgoState {
   historyDepth: number;
   /** pinned text incl. the u/esc distinction */
   footer: string;
+  /** the `i` source-preview overlay — present ONLY while open (the route renders it) */
+  preview?: EgoPreviewState;
 }
 
-export const EGO_ACTIONS = ["up", "down", "left", "right", "open", "backCenter", "refresh"] as const;
+/** Lazy source preview (the `i` overlay): loaded on OPEN, never on selection. */
+export interface EgoPreviewState {
+  ref: string;
+  status: "loading" | "ready" | "error";
+  signature?: string;
+  file?: string;
+  startLine?: number;
+  lines: string[];
+  message?: string;
+}
+
+export const EGO_ACTIONS = ["up", "down", "left", "right", "open", "backCenter", "refresh", "preview"] as const;
 export type EgoAction = (typeof EGO_ACTIONS)[number];
 export const EGO_KEYMAP: Record<EgoAction, readonly string[]> = {
   up: ["up", "k"],
@@ -55,13 +68,15 @@ export const EGO_KEYMAP: Record<EgoAction, readonly string[]> = {
   /** center history — DISTINCT from the screen-stack esc pop (Task 5) */
   backCenter: ["u", "backspace"],
   refresh: ["r"],
+  /** source preview overlay (enrichment iteration) — lazy, per open */
+  preview: ["i"],
 };
 
 export const HISTORY_CAP = 50;
 
 /** Rendered actions footer — pinned text. ≤ 78 chars so the [esc] exit hint survives
- *  stock 80-col terminals (I3); bracket tokens mirror EGO_KEYMAP (esc rides Task 5's route). */
-export const EGO_ACTIONS_LINE = "[hjkl] move  [enter] re-center  [u] prev center  [r] refresh  [esc] back";
+ *  stock 80-col terminals; bracket tokens mirror EGO_KEYMAP (esc rides Task 5's route). */
+export const EGO_ACTIONS_LINE = "[hjkl] [i] preview [enter] recenter [u] prev center [r] refresh [esc] back";
 
 /** List-view names per side — MUST mirror the rpc's EGO_CAP (src/rpc-methods.ts); pinned
  *  equal by test so drift breaks the build's test, not users. */
@@ -146,6 +161,8 @@ function missLines(ref: string, suggestions: string[], ambiguous: boolean): EgoL
 export function createEgoModel(deps: {
   ref: string;
   egoGraph: (ref: string) => Promise<EgoGraphPayload>;
+  /** lazy source preview; optional so graph-only callers keep working (no-op then) */
+  egoSource?: (ref: string) => Promise<EgoSourcePayload>;
 }) {
   let dims: Dims = { ...DEFAULT_DIMS };
   let currentRef = deps.ref;
@@ -165,6 +182,9 @@ export function createEgoModel(deps: {
   let history: HistoryEntry[] = [];
   let scroll = 0;
   let loadSeq = 0;
+  /** the `i` overlay: state exists only while open — absent from state() when closed */
+  let preview: { open: boolean; state?: EgoPreviewState } = { open: false };
+  let previewSeq = 0;
 
   /** The three navigation columns as neighbor lists (center column = the center alone). */
   function columns(): EgoNeighbor[][] {
@@ -225,6 +245,7 @@ export function createEgoModel(deps: {
   }
 
   function apply(payload: EgoGraphPayload, askedRef: string): void {
+    preview = { open: false }; // a payload swap invalidates any open preview (stale ref)
     if ("error" in payload) {
       if (payload.error === "unavailable") {
         banner = bannerUnavailable(payload.message);
@@ -379,6 +400,44 @@ export function createEgoModel(deps: {
       apply(entry.payload, entry.ref);
     },
 
+    /** `i`: open the source-preview overlay on the SELECTED box and load it LAZILY —
+     *  selection never fetches; open does (one egoSource call per open). No-op without
+     *  an egoSource dep (graph-only callers). */
+    openPreview(): void {
+      const ref = cursorRef();
+      if (ref === undefined || deps.egoSource === undefined) return;
+      const seq = ++previewSeq;
+      preview = { open: true, state: { ref, status: "loading", lines: [] } };
+      void deps.egoSource(ref).then((payload) => {
+        // stale guard: closed, superseded by another open, or invalidated by a payload swap
+        if (!preview.open || seq !== previewSeq) return;
+        if ("error" in payload) {
+          const message =
+            payload.error === "unavailable"
+              ? payload.message
+              : payload.suggestions.length > 0
+                ? `not found — did you mean (${payload.suggestions.length}) for ${ref}`
+                : `not found: ${ref}`;
+          preview.state = { ref, status: "error", lines: [], message };
+          return;
+        }
+        preview.state = {
+          ref: payload.ref,
+          status: "ready",
+          ...(payload.signature !== undefined ? { signature: payload.signature } : {}),
+          file: payload.file,
+          startLine: payload.startLine,
+          lines: payload.lines,
+        };
+      });
+    },
+
+    /** esc/i close the overlay (route-owned keys; the model just clears the state). */
+    closePreview(): void {
+      previewSeq++; // any in-flight load lands dead
+      preview = { open: false };
+    },
+
     state(): EgoState {
       const cur = cursorRef();
       let canvas: EgoCanvas | undefined;
@@ -406,6 +465,7 @@ export function createEgoModel(deps: {
         ...(cur !== undefined ? { cursorRef: cur } : {}),
         historyDepth: history.length,
         footer: EGO_ACTIONS_LINE,
+        ...(preview.open && preview.state !== undefined ? { preview: preview.state } : {}),
       };
     },
   };

@@ -12,6 +12,7 @@ import type {
   NodeDetailPayload,
   PaletteSearchPayload,
   EgoGraphPayload,
+  EgoSourcePayload,
   UnavailablePayload,
 } from "../rpc/index.js"
 
@@ -91,6 +92,17 @@ function egoGraphViaRpc(client: Client, root: string): (ref: string) => Promise<
     try {
       const result = await client.rpc.call({ rpcID: "closegraph", method: "egoGraph", input: { ref, root } })
       return result.output as EgoGraphPayload
+    } catch (err) {
+      return unavailable(err)
+    }
+  }
+}
+
+function egoSourceViaRpc(client: Client, root: string): (ref: string) => Promise<EgoSourcePayload> {
+  return async (ref: string) => {
+    try {
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "egoSource", input: { ref, root } })
+      return result.output as EgoSourcePayload
     } catch (err) {
       return unavailable(err)
     }
@@ -183,6 +195,10 @@ const DETAIL_SCREEN_KEYMAP = { ...DETAIL_KEYMAP, refresh: ["r"], palette: ["p"] 
  *  binding (the model words u vs esc apart); `palette` matches the sibling screens.
  *  Exported for the route-bits keymap tests (MAP_KEYMAP precedent). */
 export const EGO_SCREEN_KEYMAP = { ...EGO_KEYMAP, back: ["escape", "esc"], palette: ["p"] } as const
+
+/** The ego source-preview overlay's keys: esc (and `i` again) close; everything else is
+ *  swallowed while open so printables never leak into navigation (palette pattern). */
+const EGO_PREVIEW_KEYMAP = { close: ["escape", "esc", "i"] } as const
 
 /** Ego re-centers (enter / click-on-highlighted) start a fire-and-forget load inside
  *  the Task-4 contract (open(): void; the model's loadSeq guard makes stale loads
@@ -335,7 +351,11 @@ function CodeGraphRoute() {
   }
 
   function pushEgo(ref: string): void {
-    const model = createEgoModel({ ref, egoGraph: egoGraphViaRpc(context.client, sessionRoot) })
+    const model = createEgoModel({
+      ref,
+      egoGraph: egoGraphViaRpc(context.client, sessionRoot),
+      egoSource: egoSourceViaRpc(context.client, sessionRoot),
+    })
     const [state, setState] = createSignal<EgoState>(model.state())
     setScreens([...screens(), { kind: "ego", ref, model, state, sync: () => setState(model.state()) }])
     void model.load().then(() => setState(model.state()))
@@ -356,11 +376,22 @@ function CodeGraphRoute() {
   }
 
   // One route-global keyboard handler with EXPLICIT precedence (review caution from
-  // Task 4): palette (when open) → top screen → file map. Every branch dispatches
-  // through actionFor() over the KEYMAP constants above/beside the models — the
-  // constants ARE the dispatch, so they cannot drift (review minor b). Consumed
-  // keys preventDefault so the host keymap does not double-act on them.
+  // Task 4): palette (when open) → ego preview overlay (when open) → top screen → file
+  // map. Every branch dispatches through actionFor() over the KEYMAP constants above/
+  // beside the models — the constants ARE the dispatch, so they cannot drift (review
+  // minor b). Consumed keys preventDefault so the host keymap does not double-act on them.
   useKeyboard((key) => {
+    // ego source-preview overlay (palette-style): while open, EVERY key is swallowed —
+    // `i`'s printables must never leak into navigation — except the close keys.
+    const topScreen = screens().at(-1)
+    if (topScreen?.kind === "ego" && topScreen.model.state().preview !== undefined) {
+      key.preventDefault()
+      if (actionFor(EGO_PREVIEW_KEYMAP, key) === "close") {
+        topScreen.model.closePreview()
+        topScreen.sync()
+      }
+      return
+    }
     if (palette.state().open) {
       // text-entry overlay: movement is arrows-only; EVERY unmodified printable —
       // including j and k — types into the filter (review Important 3). ctrl-c is the
@@ -538,6 +569,13 @@ function CodeGraphRoute() {
         case "palette":
           key.preventDefault()
           openPalette()
+          break
+        case "preview":
+          key.preventDefault()
+          // lazy: one egoSource fetch per open; settleEgo repaints when it lands
+          screen.model.openPreview()
+          screen.sync()
+          settleEgo(screen)
           break
         case "back":
           key.preventDefault()
@@ -765,6 +803,38 @@ function CodeGraphRoute() {
     </box>
   )
 
+  /** The `i` source preview (palette-style overlay): full name + signature + the first
+   *  ~10 source lines, loaded lazily on open. Replaces the ego canvas while open —
+   *  same overlay pattern as the palette, so the graph underneath is not competing. */
+  const EgoPreviewOverlay = (props: { screen: EgoScreen }) => {
+    const p = props.screen.state().preview
+    if (p === undefined) return <EgoView screen={props.screen} />
+    return (
+      <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
+        <text width="100%" height={1} flexShrink={0} fg="cyan">
+          {p.ref}
+        </text>
+        <text width="100%" height={1} flexShrink={0} fg="gray">
+          {p.status === "loading"
+            ? "loading source…"
+            : p.status === "error"
+              ? (p.message ?? "preview unavailable")
+              : `${p.signature ?? ""} — ${p.file}:${p.startLine}`}
+        </text>
+        <box flexDirection="column" paddingTop={0} flexGrow={1}>
+          {...p.lines.map((line) => (
+            <text width="100%" height={1} flexShrink={0}>
+              {line === "" ? " " : line}
+            </text>
+          ))}
+        </box>
+        <text width="100%" height={1} flexShrink={0} fg="gray">
+          {"esc or i close"}
+        </text>
+      </box>
+    )
+  }
+
   // Signals are read INSIDE JSX expressions so every branch re-renders (a body-level
   // `const s = state()` capture runs once and freezes — spike D2 family). The view
   // choice is one opaque expression: the screen is resolved ONCE per pass — the
@@ -777,7 +847,7 @@ function CodeGraphRoute() {
         const s = top()
         if (s === undefined) return <MapView />
         if (s.kind === "symbols") return <SymbolsView screen={s} />
-        if (s.kind === "ego") return <EgoView screen={s} />
+        if (s.kind === "ego") return s.state().preview !== undefined ? <EgoPreviewOverlay screen={s} /> : <EgoView screen={s} />
         return <DetailView screen={s} />
       })()}
     </box>
