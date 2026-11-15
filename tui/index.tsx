@@ -18,6 +18,14 @@ import {
   type IdeState,
 } from "../src/view/ide-model.js"
 import { IDE_THEME } from "../src/view/ide-theme.js"
+import {
+  buildExplainPrompt,
+  extractChatTurns,
+  replyAfter,
+  type AgentMessageLike,
+  type DescribeInput,
+  type OpId,
+} from "../src/view/ide-agent.js"
 import { toSegments, type IdeSegment } from "../src/view/ide-layout.js"
 import type {
   FilesPayload,
@@ -328,6 +336,95 @@ async function runAskAgent(context: ReturnType<typeof usePlugin>, prompt: string
   }
   context.ui.dialog.alert({ title: "Ask agent", message: `Paste this prompt in chat:\n\n${prompt}` })
   context.ui.toast.show({ message: "ask-agent: no session in this project — prompt shown in dialog", variant: "warning" })
+}
+
+/** Explain poll cadence/cap (Task 3): 500 ms ticks, 60 ticks = 30 s, then the
+ *  honest timeout rejection (surfaces as the model's error state, never a hang). */
+const DESCRIBE_POLL_MS = 500
+const DESCRIBE_POLL_MAX = 60
+
+/**
+ * Map the solid Data session messages onto the pure agent-bridge rows:
+ * user/assistant only, text parts joined, order preserved. Tolerant across host
+ * shapes — the 2.2.7 client types discriminate on `type` (user text rides
+ * `.text`, assistant text rides `.content[]`); older hosts carry
+ * `{ info: { role }, parts[] }`. An assistant row counts only once COMPLETED —
+ * a streaming reply never renders half-written.
+ */
+export function agentMessageRows(list: readonly unknown[]): AgentMessageLike[] {
+  const partsText = (parts: unknown): string =>
+    Array.isArray(parts)
+      ? parts
+          .filter((p): p is { type?: unknown; text?: unknown } => typeof p === "object" && p !== null)
+          .filter((p) => p.type === undefined || p.type === "text")
+          .map((p) => (typeof p.text === "string" ? p.text : ""))
+          .join("\n")
+      : ""
+  const rows: AgentMessageLike[] = []
+  for (const raw of list) {
+    if (typeof raw !== "object" || raw === null) continue
+    const m = raw as {
+      type?: unknown
+      text?: unknown
+      content?: unknown
+      parts?: unknown
+      info?: { role?: unknown }
+      time?: { completed?: unknown }
+    }
+    const role = typeof m.type === "string" ? m.type : typeof m.info?.role === "string" ? m.info.role : undefined
+    if (role === "user") {
+      rows.push({ role: "user", text: typeof m.text === "string" ? m.text : partsText(m.content ?? m.parts) })
+    } else if (role === "assistant") {
+      if (m.time !== undefined && typeof m.time.completed !== "number") continue // still streaming
+      rows.push({ role: "assistant", text: typeof m.text === "string" ? m.text : partsText(m.content ?? m.parts) })
+    }
+    // every other message kind (system/tool/skill/…) is filtered out
+  }
+  return rows
+}
+
+/**
+ * Shared session ask (Task 3 explain + Task 4 chat): send `text` to the given
+ * session, then poll the reactive message list for the reply matched to OUR
+ * prompt — the last user row carrying exactly the text we sent, then the first
+ * completed assistant row after it (Review Focus 4: never "last assistant
+ * text", never pre-existing history). Rejects with `timeoutMessage` after
+ * DESCRIBE_POLL_MAX ticks — a send never hangs.
+ */
+async function askSession(
+  context: ReturnType<typeof usePlugin>,
+  sessionID: string,
+  text: string,
+  timeoutMessage: string,
+): Promise<string> {
+  await context.client.session.prompt({ sessionID, text })
+  for (let poll = 0; poll < DESCRIBE_POLL_MAX; poll++) {
+    await new Promise((resolve) => setTimeout(resolve, DESCRIBE_POLL_MS))
+    const rows = agentMessageRows(context.data.session.message.list(sessionID))
+    let userIndex = -1
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const row = rows[i]
+      if (row !== undefined && row.role === "user" && row.text === text) {
+        userIndex = i
+        break
+      }
+    }
+    if (userIndex === -1) continue // our user message hasn't landed in the store yet
+    const reply = replyAfter(rows, userIndex)
+    if (reply !== undefined) return reply
+  }
+  throw new Error(timeoutMessage)
+}
+
+/**
+ * Explain-this execution (Task 3): resolve the project session with the SAME
+ * rules as ask-agent (a foreign project's session is never guessed), then the
+ * shared askSession poll. Rejections surface as the model's error state.
+ */
+async function describeViaSession(context: ReturnType<typeof usePlugin>, input: DescribeInput): Promise<string> {
+  const sessionID = pickAskAgentSession(context.data.session.list(), context.location?.directory)
+  if (sessionID === undefined) throw new Error("no session in this project")
+  return askSession(context, sessionID, buildExplainPrompt(input), "explain timed out")
 }
 
 function CodeGraphRoute() {
@@ -915,17 +1012,36 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       egoGraph: egoGraphViaRpc(context.client, sessionRoot),
       nodeDetail: nodeDetailViaRpc(context.client, sessionRoot),
       egoSource: egoSourceViaRpc(context.client, sessionRoot),
+      // Task 3: the agent bridge dep. The repaint hops one macrotask past the
+      // promise settlement so the MODEL's own resolution handler (a microtask
+      // on this same promise) has stored the cache entry before sync() reads it.
+      describe: (input: DescribeInput) => {
+        const pending = describeViaSession(context, input)
+        const repaint = () => setTimeout(sync, 0)
+        void pending.then(repaint, repaint)
+        return pending
+      },
     })
 
-  const [model, setModel] = createSignal(makeModel(props.initialRef ?? ""))
+  // Task-5 ruling 2: the ONLY model swap is this bare-mount one — re-centers
+  // go through model().recenter, so the chat transcript and center history
+  // live as long as the route does.
+  const [model] = createSignal(makeModel(props.initialRef ?? ""))
   const [ideState, setIdeState] = createSignal<IdeState>(model().state())
   const sync = () => setIdeState(model().state())
   const syncPalette = () => setPaletteState(palette.state())
+  // Task 4: route-level mirror of the model's chat-open state. The reactive
+  // turn-sync effect below keys off THIS signal — reading ideState() inside
+  // the effect AND writing it via sync() would re-trigger itself forever.
+  const [chatOpen, setChatOpen] = createSignal(false)
 
   onMount(() => {
     const d = dims()
     model().resize({ width: d.width, height: d.height })
     loadIde(model())
+    // bare /closegraph: no initial ref ⇒ the model pins its pick-a-symbol miss
+    // (zero rpc) and the route opens the symbol picker straight over it
+    if (props.initialRef === undefined || props.initialRef.trim() === "") openPalette()
   })
 
   // terminal resize re-windows the model without refetches (Review Focus 2 pattern)
@@ -935,17 +1051,84 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     sync()
   })
 
-  /** Palette pick / inspector caller-callee click: re-center on ANY graph ref. The
-   *  Task-3 model exports no recenter() and selectByRef only hits drawn cards, so a
-   *  fresh model over the picked ref is the route-level re-center path (center
-   *  history resets — the same shape as opening the route with a ref argument). */
-  function recenterIde(ref: string): void {
-    const next = makeModel(ref)
-    const d = dims()
-    next.resize({ width: d.width, height: d.height })
-    setModel(() => next)
+  // Task 4: reactive chat turn sync. While the chat is open the solid session
+  // store re-runs this effect as messages land (user row → completed assistant
+  // row), so the transcript streams without a keystroke; syncChat drops the
+  // model's `sending` status once the assistant turn is latest. On hosts where
+  // Data is non-reactive it degrades to the settle-time sync in sendChat.
+  createEffect(() => {
+    if (!chatOpen()) return
+    const sessionID = pickAskAgentSession(context.data.session.list(), context.location?.directory)
+    if (sessionID === undefined) return
+    model().syncChat(extractChatTurns(agentMessageRows(context.data.session.message.list(sessionID))))
     sync()
-    loadIde(next)
+  })
+
+  /** Pull the session transcript into the model once (open path + send settle). */
+  const syncChatFromStore = () => {
+    const sessionID = pickAskAgentSession(context.data.session.list(), context.location?.directory)
+    if (sessionID === undefined) return
+    model().syncChat(extractChatTurns(agentMessageRows(context.data.session.message.list(sessionID))))
+  }
+
+  /** Task 4 chat send: the model already prefixed the graph context (or noted
+   *  its absence) — the route only needs the project session. No session ⇒
+   *  the pinned muted note, status idle, NEVER a hang. The reply path is the
+   *  shared askSession poll (Task 3's implementation, not a second one). */
+  function sendChat(text: string): void {
+    const m = model() // seq-guard family: a model swap mid-send drops the settle
+    const sessionID = pickAskAgentSession(context.data.session.list(), context.location?.directory)
+    if (sessionID === undefined) {
+      m.chatNote("no session in this project")
+      sync()
+      return
+    }
+    void askSession(context, sessionID, text, "chat timed out").then(
+      () => {
+        if (model() !== m) return
+        syncChatFromStore()
+        sync()
+      },
+      (err: unknown) => {
+        if (model() !== m) return
+        syncChatFromStore() // our user row still landed — show it
+        m.chatNote(err instanceof Error ? err.message : String(err))
+        sync()
+      },
+    )
+  }
+
+  /** Ops-pick paths open the chat INSIDE the model (opsPick runs explain/custom/
+   *  edit picks) — mirror that into the route's chatOpen signal and pull the
+   *  existing session history, exactly like the t-key branch does, so the
+   *  reactive turn-sync effect starts watching the transcript. */
+  const chatOpenedViaModel = (m: ReturnType<typeof createIdeModel>): void => {
+    if (m.state().chat === undefined) return
+    setChatOpen(true)
+    syncChatFromStore()
+  }
+
+  /** Task 5 ops pick (item key, enter, or row click): the model closes the
+   *  overlay, runs explain / opens chat / hands back the context-prefixed
+   *  prompt — the route only mirrors the chat-open and sends via the Task-4
+   *  sendChat path (no third sender). No session ⇒ sendChat's pinned note. */
+  const pickOp = (id: OpId) => {
+    const m = model() // seq-guard family: a model swap mid-send drops the settle
+    const text = m.opsPick(id)
+    sync()
+    chatOpenedViaModel(m)
+    if (text !== undefined) sendChat(text)
+  }
+
+  /** Palette pick / inspector caller-callee click: re-center THROUGH the live
+   *  model (Task-5 ruling 2) — no fresh model, so the chat transcript and the
+   *  `u` center history survive the re-center (the same path the chat's
+   *  `focus <ref>` command uses). The settle repaints when the async apply()
+   *  lands; the bare-mount fresh model (makeModel) is the only model swap left. */
+  function recenterIde(ref: string): void {
+    model().recenter(ref)
+    sync()
+    settleIde()
   }
 
   /** EGO_SETTLE_MS family: fire-and-forget re-centers/detail loads land async; a
@@ -967,11 +1150,12 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     if (m.detailDirty()) void m.loadDetail().then(sync, sync)
   }
 
-  /** Load path (onMount + recenterIde): load() resolving means apply() ran, but
-   *  the nodeDetail fetch it fired is still in flight — sync() alone paints the
-   *  inspector's "loading…" line and RESTS on it (at rest no keystroke follows,
-   *  and unbound keys hit `case undefined` and don't sync either — review
-   *  Important 1). Repaint, then arm the deterministic settle. */
+  /** Load path (onMount — the only remaining caller): load() resolving means
+   *  apply() ran, but the nodeDetail fetch it fired is still in flight —
+   *  sync() alone paints the inspector's "loading…" line and RESTS on it (at
+   *  rest no keystroke follows, and unbound keys hit `case undefined` and
+   *  don't sync either — review Important 1). Repaint, then arm the
+   *  deterministic settle. */
   const loadIde = (m: ReturnType<typeof createIdeModel>): void => {
     void m.load().then(() => {
       sync()
@@ -1038,6 +1222,99 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       return
     }
 
+    // ops overlay (Task 5): palette-style capture alongside the help branch —
+    // while open, the item keys (r/t/d/h/e/c) pick, j/k and the arrows move the
+    // cursor, enter picks the cursor item, esc closes; ALL other keys are
+    // swallowed (those letters are dispatch actions otherwise — the overlay owns
+    // them while it is up; nothing leaks into navigation)
+    if (ideState().ops !== undefined) {
+      key.preventDefault()
+      const m = model()
+      if (key.name === "escape" || key.name === "esc") {
+        m.opsClose()
+        sync()
+        return
+      }
+      if (key.name === "up" || key.name === "k") {
+        m.opsMove(-1)
+        sync()
+        return
+      }
+      if (key.name === "down" || key.name === "j") {
+        m.opsMove(1)
+        sync()
+        return
+      }
+      if (key.name === "enter" || key.name === "return") {
+        const st = m.state().ops
+        const item = st === undefined ? undefined : st.items[st.cursor]
+        if (item !== undefined) pickOp(item.id)
+        return
+      }
+      const typed = printable(key)
+      if (typed !== undefined) {
+        const item = (m.state().ops?.items ?? []).find((i) => i.key === typed)
+        if (item !== undefined) pickOp(item.id)
+      }
+      return
+    }
+
+    // chat sidebar third (Task 4): palette-style capture — while open, EVERY
+    // key is swallowed (typing/scroll/submit/close); nothing leaks into
+    // navigation. esc always closes; t closes only with an EMPTY draft
+    // (otherwise it types); enter submits; arrows scroll the transcript.
+    if (ideState().chat !== undefined) {
+      key.preventDefault()
+      const m = model()
+      const closeChat = () => {
+        m.chatClose()
+        setChatOpen(false)
+        sync()
+      }
+      if (key.name === "escape" || key.name === "esc") {
+        closeChat()
+        return
+      }
+      if (key.name === "up") {
+        m.chatScroll(1)
+        sync()
+        return
+      }
+      if (key.name === "down") {
+        m.chatScroll(-1)
+        sync()
+        return
+      }
+      if (key.name === "backspace") {
+        m.chatBackspace()
+        sync()
+        return
+      }
+      if (key.name === "enter" || key.name === "return") {
+        const result = m.chatSubmit()
+        sync()
+        if (result?.kind === "focus") {
+          // model.recenter — the same live-model path recenterIde uses now
+          // (Task-5 ruling 2): a re-center NEVER clears the transcript
+          m.recenter(result.ref)
+          sync()
+          settleIde()
+        } else if (result?.kind === "send") {
+          sendChat(result.text)
+        }
+        return
+      }
+      const typed = printable(key)
+      if (typed !== undefined) {
+        if (typed === "t" && m.state().chat?.input === "") closeChat()
+        else {
+          m.chatType(typed)
+          sync()
+        }
+      }
+      return
+    }
+
     // IDE model dispatch: IDE_KEYMAP IS the dispatch table (actionFor parity)
     const action = actionFor(IDE_KEYMAP, key)
     switch (action) {
@@ -1059,6 +1336,16 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         sync()
         const prompt = model().askAgentPrompt()
         if (prompt !== undefined) void runAskAgent(context, prompt)
+        break
+      }
+      case "chat": {
+        key.preventDefault()
+        const m = model()
+        m.dispatch("chat") // toggles; opening resets the scroll to the latest turn
+        const open = m.state().chat !== undefined
+        setChatOpen(open)
+        if (open) syncChatFromStore() // show existing session history immediately
+        sync()
         break
       }
       case "refresh": {
@@ -1165,20 +1452,70 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
-  const IdeHelpOverlay = (helpProps: { lines: string[] }) => (
+  const IdeHelpOverlay = (helpProps: { sections: { title: string; lines: string[] }[] }) => {
+    // flat rows: section titles cyan, body lines default; no scroll — clip to the
+    // viewport with a pinned "…" bottom line when the sections don't fit
+    const flatRows = () => {
+      const rows: { text: string; title: boolean }[] = []
+      for (const sec of helpProps.sections) {
+        rows.push({ text: sec.title, title: true })
+        for (const line of sec.lines) rows.push({ text: line, title: false })
+      }
+      return rows
+    }
+    const rows = () => {
+      const all = flatRows()
+      const budget = dims().height - 1 // minus the "? or esc close" footer
+      return all.length > budget ? [...all.slice(0, Math.max(0, budget - 1)), { text: "…", title: false }] : all
+    }
+    return (
+      <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
+        <box flexDirection="column" paddingTop={0} flexGrow={1}>
+          {...rows().map((row) => (
+            <text width="100%" height={1} flexShrink={0} fg={row.title ? "cyan" : undefined}>
+              {row.text === "" ? " " : row.text}
+            </text>
+          ))}
+        </box>
+        <text width="100%" height={1} flexShrink={0} fg="gray">
+          {"? or esc close"}
+        </text>
+      </box>
+    )
+  }
+
+  /** Task 5 ops overlay: the focused function's operations menu — the palette
+   *  idiom (› cursor row, gray highlight, click to pick), titled by the focus
+   *  ref so the target is never ambiguous. Full-screen overlay like help; the
+   *  harden row exists only when the focus has risk facts (the model's list).
+   *  The prop is `focusRef`, NEVER `ref` — `ref` is a reserved Solid JSX prop
+   *  (the compiler forwards a ref callback, so `opsProps.ref` renders as
+   *  function source instead of the string; ux2 Task-6 harness defect). */
+  const IdeOpsOverlay = (opsProps: { ops: NonNullable<IdeState["ops"]>; focusRef: string }) => (
     <box flexDirection="column" width="100%" height="100%" paddingLeft={1} paddingRight={1}>
       <text width="100%" height={1} flexShrink={0} fg="cyan">
-        {helpProps.lines[0] ?? "help"}
+        {`operations on ${opsProps.focusRef}`}
       </text>
       <box flexDirection="column" paddingTop={0} flexGrow={1}>
-        {...helpProps.lines.slice(1).map((line) => (
-          <text width="100%" height={1} flexShrink={0}>
-            {line === "" ? " " : line}
-          </text>
+        {...opsProps.ops.items.map((item, i) => (
+          <box
+            flexDirection="row"
+            height={1}
+            flexShrink={0}
+            backgroundColor={i === opsProps.ops.cursor ? "gray" : undefined}
+            onMouseDown={() => pickOp(item.id)}
+          >
+            <text width={3} height={1} flexShrink={0} fg={i === opsProps.ops.cursor ? "black" : undefined}>
+              {i === opsProps.ops.cursor ? "›" : " "}
+            </text>
+            <text height={1} flexShrink={0} fg={i === opsProps.ops.cursor ? "black" : undefined}>
+              {`[${item.key}] ${item.label}`}
+            </text>
+          </box>
         ))}
       </box>
       <text width="100%" height={1} flexShrink={0} fg="gray">
-        {"? or esc close"}
+        {"pick a key · j/k move · enter picks · esc close"}
       </text>
     </box>
   )
@@ -1186,8 +1523,25 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   const HeaderView = (headerProps: { s: IdeState }) => (
     <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
       <box flexDirection="row" height={1} flexShrink={0}>
+        {/* back affordance: history pop when the center history is non-empty, else
+            the esc-family quit destination; the breadcrumb shifts right 2 cols */}
+        <text
+          height={1}
+          fg={IDE_THEME.cyan}
+          onMouseDown={() => {
+            if (ideState().historyDepth > 0) {
+              model().dispatch("backCenter")
+              sync()
+              settleIde()
+            } else {
+              context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
+            }
+          }}
+        >
+          {" ← "}
+        </text>
         <text height={1} attributes={TextAttributes.BOLD} fg={IDE_THEME.cyan}>
-          {` ${headerProps.s.header.breadcrumb}`}
+          {headerProps.s.header.breadcrumb}
         </text>
         <text height={1} fg={IDE_THEME.textMuted}>
           {headerRepoLabel(headerProps.s) === "" ? "" : `  ${headerRepoLabel(headerProps.s)}`}
@@ -1266,6 +1620,51 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
+  /** Task 4 chat sidebar: pinned header hint, the role-prefixed transcript
+   *  windowed from the bottom (scroll = lines up from the latest; `+N earlier`
+   *  discloses the capped tail), and the input line with a block cursor.
+   *  Assistant text is labeled by the `agent:` prefix (generated content);
+   *  muted lines are the model's honest local notes (degrades, no context). */
+  const ChatView = (chatProps: { chat: NonNullable<IdeState["chat"]>; overlay: boolean }) => {
+    const visible = () => {
+      const lines: { text: string; fg?: string }[] = []
+      if (chatProps.chat.earlier > 0) lines.push({ text: `+${chatProps.chat.earlier} earlier`, fg: IDE_THEME.textMuted })
+      for (const turn of chatProps.chat.turns) {
+        const prefix = turn.role === "user" ? "you: " : "agent: "
+        const fg = turn.muted === true ? IDE_THEME.textMuted : turn.role === "user" ? IDE_THEME.cyan : undefined
+        turn.text.split("\n").forEach((part, i) => {
+          lines.push({ text: (i === 0 ? prefix : " ".repeat(prefix.length)) + part, fg })
+        })
+      }
+      const body = Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS - 2)
+      const start = Math.max(0, lines.length - body - chatProps.chat.scroll)
+      return lines.slice(start, start + body)
+    }
+    return (
+      <box
+        flexDirection="column"
+        width={chatProps.overlay ? undefined : INSPECTOR_W}
+        flexGrow={chatProps.overlay ? 1 : undefined}
+        flexShrink={0}
+        backgroundColor={IDE_THEME.panel}
+      >
+        <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+          {"chat — t closes · enter sends · focus <ref> recenters"}
+        </text>
+        <box flexDirection="column" flexGrow={1}>
+          {...visible().map((line) => (
+            <text width="100%" height={1} flexShrink={0} fg={line.fg}>
+              {line.text === "" ? " " : line.text}
+            </text>
+          ))}
+        </box>
+        <text width="100%" height={1} flexShrink={0}>
+          {`▸ ${chatProps.chat.input}█${chatProps.chat.status === "sending" ? " …" : ""}`}
+        </text>
+      </box>
+    )
+  }
+
   const CommandBar = (barProps: { s: IdeState }) => (
     <box flexDirection="column" height={COMMAND_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
       <box flexDirection="row" height={1} flexShrink={0}>
@@ -1291,10 +1690,20 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       {(() => {
         if (paletteState().open) return <IdePaletteOverlay />
         const s = ideState()
-        if (s.help !== undefined) return <IdeHelpOverlay lines={s.help} />
+        if (s.help !== undefined) return <IdeHelpOverlay sections={s.help} />
+        // Task 5: the ops overlay is a full-screen overlay alongside help — it
+        // swallows keys and screen while open (the route branch above)
+        if (s.ops !== undefined) return <IdeOpsOverlay ops={s.ops} focusRef={s.focusRef} />
+        // Task 4: an open chat rides the inspector-overlay path in the narrow
+        // modes — it REPLACES the canvas (the model's `chat replaces canvas`
+        // note family), never squeezes a <40-col viewport. In full/no-sidebar
+        // it takes the right panel instead of the inspector.
+        const chatOverlay =
+          s.chat !== undefined && (s.mode === "no-panels" || s.mode === "compact" || s.mode === "list")
         // compact/no-panels inspector overlay ⇒ the inspector REPLACES the canvas
         // (the model's panelLayout doc ruling) instead of splitting a <40-col viewport
-        const overlayInspector = s.inspector !== undefined && (s.mode === "no-panels" || s.mode === "compact")
+        const overlayInspector =
+          !chatOverlay && s.inspector !== undefined && (s.mode === "no-panels" || s.mode === "compact")
         return (
           <>
             <HeaderView s={s} />
@@ -1307,7 +1716,9 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
               ) : (
                 []
               )}
-              {overlayInspector ? (
+              {chatOverlay ? (
+                <ChatView chat={s.chat!} overlay={true} />
+              ) : overlayInspector ? (
                 <InspectorView inspector={s.inspector!} overlay={true} />
               ) : s.screen === "miss" ? (
                 <box flexDirection="column" flexGrow={1}>
@@ -1322,7 +1733,12 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
                   {...(s.canvas?.rows ?? []).map((row) => <SegmentRow row={row} />)}
                 </box>
               )}
-              {!overlayInspector && s.inspector !== undefined ? (
+              {!chatOverlay && !overlayInspector && s.chat !== undefined ? (
+                <>
+                  <Separator />
+                  <ChatView chat={s.chat} overlay={false} />
+                </>
+              ) : !chatOverlay && !overlayInspector && s.inspector !== undefined ? (
                 <>
                   <Separator />
                   <InspectorView inspector={s.inspector} overlay={false} />
@@ -1352,7 +1768,7 @@ export default Plugin.define({
     })
     // codegraph-ide-screen plan Task 4: the IDE screen is an ADDITIVE sibling page —
     // the graph route above is untouched. An optional ref argument pre-selects the
-    // center (`/codegraph src/a.ts#f`).
+    // center (`/closegraph src/a.ts#f`); a bare `/closegraph` opens the symbol picker.
     const unregisterIde = context.ui.router.register({
       name: "codegraph",
       render: (input) => <CodegraphIdeRoute initialRef={typeof input.data?.ref === "string" ? input.data.ref : undefined} />,
@@ -1366,7 +1782,7 @@ export default Plugin.define({
           title: "Open CodeGraph",
           group: "CodeGraph",
           palette: true,
-          slash: { name: "closegraph" },
+          // no slash: /closegraph now opens the IDE (Task 1) — palette entry stays
           run: () => context.ui.router.navigate({ type: "plugin", name: "graph" }),
         },
         {
@@ -1374,7 +1790,7 @@ export default Plugin.define({
           title: "Open CodeGraph IDE",
           group: "CodeGraph",
           palette: true,
-          slash: { name: "codegraph", arguments: true },
+          slash: { name: "closegraph", arguments: true },
           run: (input) =>
             context.ui.router.navigate({ type: "plugin", name: "codegraph", data: input?.trim() ? { ref: input.trim() } : undefined }),
         },
