@@ -103,7 +103,24 @@ export interface EgoSourceData extends Provenance {
 }
 
 export type FilesPayload = (Provenance & { files: FileSummary[] }) | UnavailablePayload;
-export type FileSymbolsPayload = (Provenance & { symbols: SymbolSummary[] }) | UnavailablePayload;
+
+/** One resolved caller→callee pair, both endpoints inside the same file. */
+export interface WirePair {
+  from: string;
+  to: string;
+}
+
+export type FileSymbolsPayload =
+  | (Provenance & {
+      symbols: SymbolSummary[];
+      /** distinct intra-file call pairs, sorted (from, to), capped at 120 */
+      wires: WirePair[];
+      /** exact pair count before capping */
+      wiresTotal: number;
+      /** present only when capping dropped pairs */
+      wiresTruncated?: true;
+    })
+  | UnavailablePayload;
 export type NodeDetailPayload = (Provenance & NodeDetail) | NotFoundPayload | UnavailablePayload;
 export type PaletteSearchPayload = (Provenance & { matches: PaletteMatch[] }) | UnavailablePayload;
 export type EgoGraphPayload = EgoGraphData | NotFoundPayload | UnavailablePayload;
