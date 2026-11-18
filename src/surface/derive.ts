@@ -4,7 +4,7 @@
  * claims are validated wholesale (unknown evidence → the whole claim is
  * rejected, never partially applied).
  */
-import { inScope } from "./store";
+import { inScope, type SurfaceStore } from "./store";
 import { isLoginPath, normalizeEndpointPath, normalizePageUrl, normalizeTarget } from "./normalize";
 import {
   makeSurfaceNodeId,
@@ -14,7 +14,6 @@ import {
   type StoredObservation,
   type SurfaceNode,
   type SurfaceNodeKind,
-  type SurfaceStore,
 } from "./types";
 
 export interface IngestResult {
@@ -204,8 +203,9 @@ export function deriveIngest(store: SurfaceStore, input: IngestInput, nowIso: st
       bump(store.upsertNode(cookieNode) === "created" ? created : updated, "Cookie");
       // seenOn is documented as capped 50 — trim after the union
       const node = store.node(cookieId)!;
-      const seenOn = [...new Set(node.attrs.seenOn as string[])].sort();
-      if (seenOn.length !== node.attrs.seenOn.length || (seenOn as string[]).length > COOKIE_SEEN_CAP) {
+      const priorSeenOn = node.attrs.seenOn as string[];
+      const seenOn = [...new Set(priorSeenOn)].sort();
+      if (seenOn.length !== priorSeenOn.length || seenOn.length > COOKIE_SEEN_CAP) {
         node.attrs.seenOn = seenOn.slice(0, COOKIE_SEEN_CAP);
       }
       store.addEdge({
