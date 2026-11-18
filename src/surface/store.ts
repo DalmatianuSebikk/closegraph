@@ -35,7 +35,12 @@ function lowerAuthority(u: string): string {
 export function inScope(scope: string[], url: string): boolean {
   if (scope.length === 0) return true;
   const u = lowerAuthority(url);
-  return scope.some((rule) => u.startsWith(lowerAuthority(rule)));
+  // boundary-aware prefix: a rule owns itself and everything BELOW its path
+  // segment (/api does not own /apiv2). Errs toward flagging out of scope.
+  return scope.some((r) => {
+    const rule = lowerAuthority(r);
+    return u === rule || u.startsWith(rule.endsWith("/") ? rule : `${rule}/`);
+  });
 }
 
 const EVIDENCE_CAP = 100;

@@ -245,7 +245,12 @@ export function deriveIngest(store: SurfaceStore, input: IngestInput, nowIso: st
   };
 
   for (const claim of input.claims?.functionalities ?? []) {
-    const { storedIds, bad } = resolveEvidence(claim.evidence);
+    const evidenceIds = claim.evidence ?? [];
+    if (evidenceIds.length === 0) {
+      rejectedClaims.push({ kind: "functionality", name: claim.name, reason: "no evidence cited" });
+      continue;
+    }
+    const { storedIds, bad } = resolveEvidence(evidenceIds);
     if (bad !== undefined) {
       rejectedClaims.push({ kind: "functionality", name: claim.name, reason: `unknown evidence id: ${bad}` });
       continue;
@@ -320,7 +325,12 @@ export function deriveIngest(store: SurfaceStore, input: IngestInput, nowIso: st
   // Wiring claims run after functionality claims so same-call names resolve.
   for (const claim of input.claims?.wiring ?? []) {
     const label = `${claim.from} -> ${claim.to}`;
-    const { storedIds, bad } = resolveEvidence(claim.evidence);
+    const evidenceIds = claim.evidence ?? [];
+    if (evidenceIds.length === 0) {
+      rejectedClaims.push({ kind: "wiring", name: label, reason: "no evidence cited" });
+      continue;
+    }
+    const { storedIds, bad } = resolveEvidence(evidenceIds);
     if (bad !== undefined) {
       rejectedClaims.push({ kind: "wiring", name: label, reason: `unknown evidence id: ${bad}` });
       continue;

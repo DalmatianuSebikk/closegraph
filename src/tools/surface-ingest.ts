@@ -8,6 +8,7 @@
 import type { Info } from "@opencode/plugin/promise/tool";
 import type { SurfaceService } from "../surface/surface-service.js";
 import { deriveIngest, type IngestResult } from "../surface/derive.js";
+import { normalizeTarget } from "../surface/normalize.js";
 import type { IngestInput, SurfaceNodeKind } from "../surface/types.js";
 
 /** Hard input caps (Review Focus 5: an agent pasting a proxy log must be
@@ -71,8 +72,36 @@ export function createSurfaceIngestTool(surface: SurfaceService): Info {
         claims: {
           type: "object",
           properties: {
-            functionalities: { type: "array", maxItems: CLAIMS_CAP },
-            wiring: { type: "array", maxItems: CLAIMS_CAP },
+            functionalities: {
+              type: "array",
+              maxItems: CLAIMS_CAP,
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  pageUrl: { type: "string" },
+                  description: { type: "string" },
+                  evidence: { type: "array", items: { type: "string" }, minItems: 1 },
+                },
+                required: ["name", "pageUrl", "evidence"],
+                additionalProperties: false,
+              },
+            },
+            wiring: {
+              type: "array",
+              maxItems: CLAIMS_CAP,
+              items: {
+                type: "object",
+                properties: {
+                  from: { type: "string" },
+                  to: { type: "string" },
+                  description: { type: "string" },
+                  evidence: { type: "array", items: { type: "string" }, minItems: 1 },
+                },
+                required: ["from", "to", "evidence"],
+                additionalProperties: false,
+              },
+            },
           },
         },
       },
@@ -97,13 +126,20 @@ export function createSurfaceIngestTool(surface: SurfaceService): Info {
         return { content: overCap("wiring", wiringClaims, CLAIMS_CAP), metadata: { rejected: true, count: wiringClaims } };
       }
 
+      let knownTarget: boolean | undefined; // set once the target normalizes AND list() has been read
       try {
-        const handle = await surface.get(input.target); // throws on invalid target
+        const target = normalizeTarget(input.target); // throws on invalid target
+        // a target not in list() yet would be CREATED (cached) by the get below —
+        // remember that so a rejected batch cannot ghost into list()
+        knownTarget = (await surface.list()).includes(target);
+        const handle = await surface.get(target);
         const result = deriveIngest(handle.store, input, new Date().toISOString());
         await handle.save(); // best-effort; in-memory stays the truth
         return { content: renderSummary(result), metadata: { result } };
       } catch (error) {
-        // invalid target / duplicate ids / target mismatch — nothing was applied
+        // invalid target / duplicate ids / target mismatch — nothing was applied;
+        // drop a cache entry this call created (storage was never written)
+        if (knownTarget === false) surface.invalidate(input.target);
         return { content: `surface ingest: ${error instanceof Error ? error.message : String(error)}` };
       }
     },
