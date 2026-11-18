@@ -483,11 +483,17 @@ export function createIdeModel(deps: {
    *  refresh). The route awaits whenEntrySettled() to repaint when entry data
    *  lands — the ops themselves never reject (Task 2/3 contracts). */
   let entryPending: Promise<void> = Promise.resolve();
-  const entry = createEntryModel({
-    files: deps.files ?? (async () => ({ error: "unavailable" as const, message: ENTRY_RPC_UNAVAILABLE })),
-    fileSymbols:
-      deps.fileSymbols ?? (async () => ({ error: "unavailable" as const, message: ENTRY_RPC_UNAVAILABLE })),
-  });
+  const entry = createEntryModel(
+    {
+      files: deps.files ?? (async () => ({ error: "unavailable" as const, message: ENTRY_RPC_UNAVAILABLE })),
+      fileSymbols:
+        deps.fileSymbols ?? (async () => ({ error: "unavailable" as const, message: ENTRY_RPC_UNAVAILABLE })),
+    },
+    // the entry list lives INSIDE the IDE route: its rows share the viewport with
+    // the route's chrome (header/command/ask) plus up to 3 disclosure lines
+    // (loading / ↑ earlier / … more). Direct-model tests keep the standalone default.
+    { reservedRows: HEADER_ROWS + COMMAND_ROWS + ASK_ROWS + 3 },
+  );
   // Bare /closegraph: the entry list starts loading the moment the model exists
   // (the route's onMount load() would also land here, but the entry screens must
   // not depend on it). A real <ref> never touches the file rpc.
@@ -724,7 +730,10 @@ export function createIdeModel(deps: {
   function recenter(ref: string): void {
     if (onEntry) {
       // entering from an entry screen (card focus / palette pick): the entry
-      // flow is returnTo-based — it NEVER pushes onto the center history
+      // flow is returnTo-based — it NEVER pushes onto the center history.
+      // cancelOpen() discards an in-flight file refresh so its settle cannot
+      // repaint the file-view the user just navigated away from (finding 3).
+      entry.cancelOpen();
       returnTo = entry.state().screen === "file-view" ? "file-view" : "file-list";
       focusRef = ref;
       void load();
@@ -811,6 +820,7 @@ export function createIdeModel(deps: {
     if (!onEntry) {
       if (returnTo === undefined) return false;
       loadSeq++; // kill any in-flight graph load — the entry screens own the view now
+      entry.cancelOpen(); // and any stale entry fetch (defensive parity with recenter)
       onEntry = true;
       returnTo = undefined;
       actionNote = undefined;

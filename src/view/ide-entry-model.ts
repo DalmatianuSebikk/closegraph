@@ -114,7 +114,26 @@ function computeDepths(refs: string[], wires: WirePair[]): Map<string, number> {
   return depths;
 }
 
-export function createEntryModel(deps: { files: () => Promise<FilesPayload>; fileSymbols: (file: string) => Promise<FileSymbolsPayload> }) {
+/** Reconciles the model's wire accounting with what the layout actually painted.
+ *  The model counts a wire drawn when its source card's parentRef matches (one per
+ *  parented card); the gutter router may still DROP lane-blocked edges — those land
+ *  in canvas.undrawnEdges alongside the parentless-card count. `drawn − dropped`
+ *  (dropped = undrawnEdges − parentlessCards) is what the user sees as arrowheads;
+ *  the difference moves to undrawn so drawn+undrawn+truncated === total always. */
+export function reconcileWires(
+  wires: { drawn: number; undrawn: number; truncated: number; total: number },
+  canvasUndrawnEdges: number,
+  parentlessCards: number,
+): { drawn: number; undrawn: number; truncated: number } {
+  const dropped = Math.max(0, canvasUndrawnEdges - parentlessCards);
+  const drawn = Math.max(0, wires.drawn - dropped);
+  return { drawn, undrawn: wires.undrawn + (wires.drawn - drawn), truncated: wires.truncated };
+}
+
+export function createEntryModel(
+  deps: { files: () => Promise<FilesPayload>; fileSymbols: (file: string) => Promise<FileSymbolsPayload> },
+  opts?: { reservedRows?: number },
+) {
   let dims: Dims = { ...DEFAULT_DIMS };
   let sorted: { ref: string; language: string; symbols: number; bucket: RiskBucket }[] = [];
   let banner: Banner = bannerNone();
@@ -125,9 +144,13 @@ export function createEntryModel(deps: { files: () => Promise<FilesPayload>; fil
   let screen: "file-list" | "file-view" = "file-list";
   let view: Omit<EntryFileViewState, "banner"> | undefined;
   let openSeq = 0;
+  /** Rows the host route's chrome consumes (header/command/ask + disclosure lines).
+   *  Standalone default = ENTRY_RESERVED_ROWS; the IDE model passes its real chrome
+   *  (final-review finding 2: 4 was the file-map convention, not this route's 7+3). */
+  const reservedRows = Math.max(1, opts?.reservedRows ?? ENTRY_RESERVED_ROWS);
 
   function maxRows(): number {
-    return Math.max(1, dims.height - ENTRY_RESERVED_ROWS);
+    return Math.max(1, dims.height - reservedRows);
   }
 
   function clampWindow(): void {
@@ -252,9 +275,19 @@ export function createEntryModel(deps: { files: () => Promise<FilesPayload>; fil
       }
     },
 
-    /** Back to the file list — the list state (cursor, window, rows) was kept intact. */
+    /** Back to the file list — the list state (cursor, window, rows) was kept intact.
+     *  Bumps openSeq: an in-flight openFile/refresh settles into a discard, never a
+     *  screen flip back into file-view the user just left (final-review finding 3). */
     back(): void {
+      openSeq++;
       screen = "file-list";
+    },
+
+    /** Discards any pending openFile application without changing the screen —
+     *  the host model calls this when a card takes focus (recenter) so a settling
+     *  file refresh cannot repaint over the navigation the user just commanded. */
+    cancelOpen(): void {
+      openSeq++;
     },
 
     /** Dims change re-windows without a refetch; the cursor keeps its absolute slot. */

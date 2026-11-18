@@ -29,6 +29,7 @@ import {
 } from "../src/view/ide-agent.js"
 import { ideLayout, toSegments, type IdeCard, type IdeColumn, type IdeSegment } from "../src/view/ide-layout.js"
 import type { EntryFileViewState, EntryRow, FileListState } from "../src/view/ide-entry-model.js"
+import { reconcileWires } from "../src/view/ide-entry-model.js"
 import type {
   FilesPayload,
   FileSymbolsPayload,
@@ -1845,6 +1846,11 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       cards: byColumn.get(column) ?? [],
     }))
     const canvas = ideLayout({ columns, ...(selRef !== undefined ? { selectedRef: selRef } : {}), compact })
+    // honest wire accounting (final-review finding 1): the gutter router drops
+    // lane-blocked parent edges — those painted-less wires move from drawn to undrawn
+    const deepest = [...byColumn.keys()].reduce((a, b) => Math.max(a, b), -1)
+    const parentless = es.cards.filter((c) => c.column !== deepest && c.parentRef === undefined).length
+    const shown = reconcileWires(es.wires, canvas.undrawnEdges, parentless)
     const rows = toSegments(canvas.cells, canvas.width)
     const selRect = selRef !== undefined ? canvas.cardRects.get(selRef) : undefined
     const anchor =
@@ -1864,7 +1870,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
           []
         )}
         <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
-          {`wires: ${es.wires.drawn} drawn · ${es.wires.undrawn} undrawn — enter a card to see all relations`}
+          {`wires: ${shown.drawn} drawn · ${shown.undrawn} undrawn — enter a card to see all relations`}
         </text>
         {es.moreSymbols > 0 ? (
           <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
