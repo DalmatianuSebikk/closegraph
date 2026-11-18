@@ -18,7 +18,7 @@ import {
   ASK_ROWS,
   type IdeState,
 } from "../src/view/ide-model.js"
-import { IDE_THEME } from "../src/view/ide-theme.js"
+import { IDE_THEME, categoryOf, riskColor } from "../src/view/ide-theme.js"
 import {
   buildExplainPrompt,
   extractChatTurns,
@@ -27,7 +27,8 @@ import {
   type DescribeInput,
   type OpId,
 } from "../src/view/ide-agent.js"
-import { toSegments, type IdeSegment } from "../src/view/ide-layout.js"
+import { ideLayout, toSegments, type IdeCard, type IdeColumn, type IdeSegment } from "../src/view/ide-layout.js"
+import type { EntryFileViewState, EntryRow, FileListState } from "../src/view/ide-entry-model.js"
 import type {
   FilesPayload,
   FileSymbolsPayload,
@@ -1039,10 +1040,15 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   onMount(() => {
     const d = dims()
     model().resize({ width: d.width, height: d.height })
-    loadIde(model())
-    // bare /closegraph: no initial ref ⇒ the model pins its pick-a-symbol miss
-    // (zero rpc) and the route opens the symbol picker straight over it
-    if (props.initialRef === undefined || props.initialRef.trim() === "") openPalette()
+    // File-entry Task 5: bare /closegraph opens the model's file LIST — the
+    // entry kick fired at construction (Task 4), so wait for it to settle and
+    // paint; the palette no longer auto-opens (it stays on / and p). A real
+    // <ref> takes the load path (apply + deterministic detail settle).
+    if (props.initialRef !== undefined && props.initialRef.trim() !== "") {
+      loadIde(model())
+    } else {
+      void model().whenEntrySettled().then(sync)
+    }
   })
 
   // terminal resize re-windows the model without refetches (Review Focus 2 pattern)
@@ -1141,6 +1147,15 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       if (m.detailDirty()) void m.loadDetail().then(sync, sync)
       else sync()
     }, EGO_SETTLE_MS)
+  }
+
+  /** File-entry Task 5: entry data lands async (list kick, file open, refresh) —
+   *  the model tracks the last entry op's promise; repaint when it settles. A
+   *  card open re-centers through the graph path, so the ego settle stays armed
+   *  too (the resolved-promise sync in the no-op case is one harmless microtask). */
+  const settleEntry = () => {
+    void model().whenEntrySettled().then(sync)
+    settleIde()
   }
 
   /** Model-contract detail settle (the ide-model.ts header ruling): detailDirty()
@@ -1317,13 +1332,18 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       case "back":
         key.preventDefault()
         // esc goes BACK first: pop the center history while it is non-empty
-        // (same as the header [←] back button and [u]); at the root — nothing
-        // earlier — it quits the SCREEN: newest root session in this project,
-        // else the home route (the model's back action stays a deliberate no-op)
+        // (same as the header [←] back button and [u]); then the entry chain —
+        // focus → file-view → file-list (Task 4's entryBack handles it, state
+        // kept); at the root — nothing earlier — it quits the SCREEN: newest
+        // root session in this project, else the home route (the model's back
+        // action stays a deliberate no-op)
         if (ideState().historyDepth > 0) {
           model().dispatch("backCenter")
           sync()
           settleIde()
+        } else if (model().entryBack()) {
+          sync()
+          settleEntry()
         } else {
           context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
         }
@@ -1367,7 +1387,9 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         const m = model()
         m.dispatch(action)
         sync()
-        settleIde() // re-centers/selection changes load async — repaint when they land
+        // entry opens/refreshes load async (whenEntrySettled); graph actions
+        // keep the ego settle — settleEntry arms both (Task 5)
+        settleEntry()
         break
       }
     }
@@ -1381,10 +1403,21 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     settleIde()
   }
 
+  /** File-entry Task 5 click parity: an entry row/card click is the mouse
+   *  equivalent of move+enter — the model jumps the cursor and opens; the open
+   *  fetch lands async, so the entry settle repaints (a card open re-centers
+   *  through the graph path — same settle family as clickSegment). */
+  const clickEntry = (ref: string) => {
+    model().entryClick(ref)
+    sync()
+    settleEntry()
+  }
+
   /** One canvas/minimap row: width-pinned height-1 segments (E7 verbatim; E3: the
-   *  layout pads/truncates so a segment's text length IS its width). Mouse handlers
-   *  only on segments carrying a ref. */
-  const SegmentRow = (rowProps: { row: IdeSegment[] }) => (
+   * layout pads/truncates so a segment's text length IS its width). Mouse handlers
+   * only on segments carrying a ref. File-entry Task 5: the file-view canvas
+   * passes its own click handler (entry semantics) — default is the graph's. */
+  const SegmentRow = (rowProps: { row: IdeSegment[]; onItemClick?: (ref: string) => void }) => (
     <box flexDirection="row" height={1} flexShrink={0}>
       {...rowProps.row.map((seg) => (
         <text
@@ -1393,7 +1426,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
           fg={seg.fg}
           bg={seg.bg}
           attributes={segmentAttributes(seg)}
-          onMouseDown={seg.ref !== undefined ? () => clickSegment(seg.ref!) : undefined}
+          onMouseDown={seg.ref !== undefined ? () => (rowProps.onItemClick ?? clickSegment)(seg.ref!) : undefined}
         >
           {seg.text}
         </text>
@@ -1720,6 +1753,137 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
+  /** File-entry Task 5 — the file LIST: windowed rows (the model owns the
+   *  window), risk marker + language + symbol count per row, › cursor + gray
+   *  selection (palette idiom); click = move+open. Window edges disclose the
+   *  exact hidden counts (chat/palette disclosure wording family). */
+  const FileListView = (listProps: { es: FileListState }) => {
+    const es = listProps.es
+    const sel = (i: number): boolean => es.windowOffset + i === es.cursor
+    const markerFg = (marker: EntryRow["marker"]): string =>
+      marker === "!!!" ? riskColor("high") : marker !== "" ? riskColor("medium") : riskColor("low")
+    return (
+      <box flexDirection="column" flexGrow={1} paddingLeft={1}>
+        {es.loading ? (
+          <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            loading…
+          </text>
+        ) : (
+          []
+        )}
+        {...es.rows.map((row, i) => (
+          <box
+            flexDirection="row"
+            height={1}
+            flexShrink={0}
+            backgroundColor={sel(i) ? "gray" : undefined}
+            onMouseDown={() => clickEntry(row.ref)}
+          >
+            <text width={4} height={1} flexShrink={0} fg={sel(i) ? "black" : markerFg(row.marker)}>
+              {sel(i) ? "› " : row.marker === "" ? "  " : `${row.marker} `}
+            </text>
+            <text height={1} flexShrink={0} fg={sel(i) ? "black" : undefined}>
+              {row.ref}
+            </text>
+            <text height={1} flexShrink={0} fg={sel(i) ? "black" : IDE_THEME.textMuted}>
+              {`  ${row.language} · ${row.symbols} symbols`}
+            </text>
+          </box>
+        ))}
+        {es.windowOffset > 0 ? (
+          <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            {`↑ ${es.windowOffset} earlier`}
+          </text>
+        ) : (
+          []
+        )}
+        {es.windowOffset + es.rows.length < es.total ? (
+          <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            {`… +${es.total - es.windowOffset - es.rows.length} more`}
+          </text>
+        ) : (
+          []
+        )}
+      </box>
+    )
+  }
+
+  /** File-entry Task 5 — the file VIEW: the file's symbols as cards in the
+   *  model's call-depth columns, composed through the SAME ideLayout gutter
+   *  router the graph screen uses. The deepest layer is the layout's "center"
+   *  column, so every other card routes via parentRef left→right (caller →
+   *  callee); the ring-1 to-center rule never fires and no wire is invented —
+   *  Task 3's drawn/undrawn/truncated accounting stays exact. Vertically
+   *  windowed around the selected card (no file-view scroll surface in v1). */
+  const FileViewCanvas = (viewProps: { es: EntryFileViewState }) => {
+    const es = viewProps.es
+    const compact = dims().width < 80
+    const footerLines =
+      (es.note !== null ? 1 : 0) + 1 /* wires line */ + (es.moreSymbols > 0 ? 1 : 0) + (es.wires.truncated > 0 ? 1 : 0)
+    const body = Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS - footerLines)
+    const selRef = es.cards[es.cursor]?.ref
+    const byColumn = new Map<number, IdeCard[]>()
+    for (const card of es.cards) {
+      const list = byColumn.get(card.column) ?? []
+      list.push({
+        ref: card.ref,
+        name: card.ref.slice(card.ref.lastIndexOf("#") + 1),
+        category: categoryOf(es.file),
+        kind: card.kind,
+        file: es.file,
+        startLine: 0,
+        risk: card.marker === "!!!" ? "high" : card.marker !== "" ? "medium" : "low",
+        fanIn: card.callers,
+        fanOut: card.callees,
+        ...(card.parentRef !== undefined ? { parentRef: card.parentRef } : {}),
+      })
+      byColumn.set(card.column, list)
+    }
+    const columns: IdeColumn[] = [...byColumn.keys()].sort((a, b) => a - b).map((column, i, all) => ({
+      side: i === all.length - 1 ? "center" : "left",
+      ring: i === all.length - 1 ? 0 : 2, // ring ≥ 2 ⇒ parentRef routing; never the ring-1 to-center rule
+      cards: byColumn.get(column) ?? [],
+    }))
+    const canvas = ideLayout({ columns, ...(selRef !== undefined ? { selectedRef: selRef } : {}), compact })
+    const rows = toSegments(canvas.cells, canvas.width)
+    const selRect = selRef !== undefined ? canvas.cardRects.get(selRef) : undefined
+    const anchor =
+      canvas.height <= body
+        ? 0
+        : Math.max(0, Math.min((selRect?.y ?? 0) - 2, canvas.height - body))
+    return (
+      <box flexDirection="column" flexGrow={1} backgroundColor={IDE_THEME.background}>
+        {...rows.slice(anchor, anchor + body).map((row) => (
+          <SegmentRow row={row} onItemClick={clickEntry} />
+        ))}
+        {es.note !== null ? (
+          <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            {es.note}
+          </text>
+        ) : (
+          []
+        )}
+        <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+          {`wires: ${es.wires.drawn} drawn · ${es.wires.undrawn} undrawn — enter a card to see all relations`}
+        </text>
+        {es.moreSymbols > 0 ? (
+          <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            {`… +${es.moreSymbols} more symbols`}
+          </text>
+        ) : (
+          []
+        )}
+        {es.wires.truncated > 0 ? (
+          <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            {`… +${es.wires.truncated} wires truncated (of ${es.wires.total} total)`}
+          </text>
+        ) : (
+          []
+        )}
+      </box>
+    )
+  }
+
   // Signals are read INSIDE JSX expressions so every branch re-renders (D2/D3); the
   // view choice is ONE opaque IIFE — the transform decomposes bare nested ternaries.
   return (
@@ -1754,6 +1918,10 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
                 <ChatView chat={s.chat!} overlay={true} />
               ) : overlayInspector ? (
                 <InspectorView inspector={s.inspector!} overlay={true} />
+              ) : s.entry !== undefined && s.entry.screen === "file-list" ? (
+                <FileListView es={s.entry} />
+              ) : s.entry !== undefined && s.entry.screen === "file-view" ? (
+                <FileViewCanvas es={s.entry} />
               ) : s.screen === "miss" ? (
                 <box flexDirection="column" flexGrow={1}>
                   {...(s.miss?.lines ?? []).map((line) => (

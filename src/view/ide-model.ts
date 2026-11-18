@@ -479,6 +479,10 @@ export function createIdeModel(deps: {
   /** Where esc lands from a graph/miss screen that was entered from an entry
    *  screen (card focus or palette pick). Undefined = entered directly. */
   let returnTo: "file-list" | "file-view" | undefined;
+  /** File-entry Task 5: the last entry op's promise (construction kick, open,
+   *  refresh). The route awaits whenEntrySettled() to repaint when entry data
+   *  lands — the ops themselves never reject (Task 2/3 contracts). */
+  let entryPending: Promise<void> = Promise.resolve();
   const entry = createEntryModel({
     files: deps.files ?? (async () => ({ error: "unavailable" as const, message: ENTRY_RPC_UNAVAILABLE })),
     fileSymbols:
@@ -487,7 +491,7 @@ export function createIdeModel(deps: {
   // Bare /closegraph: the entry list starts loading the moment the model exists
   // (the route's onMount load() would also land here, but the entry screens must
   // not depend on it). A real <ref> never touches the file rpc.
-  if (deps.ref === "") void entry.load();
+  if (deps.ref === "") entryPending = entry.load();
 
   function viewportHeight(): number {
     return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS);
@@ -702,7 +706,8 @@ export function createIdeModel(deps: {
       returnTo = undefined;
       banner = bannerNone();
       miss = undefined;
-      void entry.load();
+      entryPending = entry.load();
+      await entryPending; // Task 5: callers (the route) repaint when the list lands
       return;
     }
     const seq = ++loadSeq;
@@ -758,22 +763,45 @@ export function createIdeModel(deps: {
   }
 
   /** enter on an entry screen: file-list → open the selected file; file-view →
-   *  focus the selected card (recenter records the returnTo). */
+   *  focus the selected card (recenter records the returnTo). File opens are
+   *  tracked in entryPending so the route can repaint when the fetch lands. */
   function entryOpen(): void {
     if (entry.state().screen === "file-list") {
       const file = entry.selectedFile();
-      if (file !== undefined) void entry.openFile(file);
+      if (file !== undefined) entryPending = entry.openFile(file);
       return;
     }
     const card = entry.selectedCard();
     if (card !== undefined) recenter(card.ref);
   }
 
-  /** r on an entry screen: re-fetch the list, or re-open the current file. */
-  function refreshEntry(): void {
+  /** r on an entry screen: re-fetch the list, or re-open the current file. The
+   *  returned promise is also entryPending — refresh() awaits it so its own
+   *  settle repaints with data (never a stale window). */
+  function refreshEntry(): Promise<void> {
     const es = entry.state();
-    if (es.screen === "file-view") void entry.openFile(es.file);
-    else void entry.refresh();
+    entryPending = es.screen === "file-view" ? entry.openFile(es.file) : entry.refresh();
+    return entryPending;
+  }
+
+  /** Task 5 click parity: jump the entry cursor to a ref (a visible list row or
+   *  a rendered card) and open it — the mouse equivalent of move+enter. Returns
+   *  false (no state change, no rpc) when the ref is unknown or off-entry. */
+  function entryClick(ref: string): boolean {
+    if (!onEntry) return false;
+    const es = entry.state();
+    if (es.screen === "file-list") {
+      const at = es.rows.findIndex((r) => r.ref === ref);
+      if (at < 0) return false;
+      entry.move(es.windowOffset + at - es.cursor);
+      entryOpen();
+      return true;
+    }
+    const at = es.cards.findIndex((c) => c.ref === ref);
+    if (at < 0) return false;
+    entry.move(at - es.cursor);
+    entryOpen();
+    return true;
   }
 
   /** esc from any screen: graph/miss with a returnTo → back to that entry screen
@@ -1671,7 +1699,7 @@ export function createIdeModel(deps: {
      *  entry screen (list re-fetch / file re-open). */
     async refresh(): Promise<void> {
       if (onEntry) {
-        refreshEntry();
+        await refreshEntry(); // Task 5: resolve AFTER the entry fetch settles
         return;
       }
       await load();
@@ -1907,5 +1935,14 @@ export function createIdeModel(deps: {
     },
 
     loadDetail,
+
+    // File-entry Task 5 (route surface): async settle + mouse parity for the
+    // entry screens.
+    /** Resolves when the last entry op (kick/open/refresh) has settled — the
+     *  route's deterministic repaint hook for entry data. */
+    whenEntrySettled(): Promise<void> {
+      return entryPending;
+    },
+    entryClick,
   };
 }
