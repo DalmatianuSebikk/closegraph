@@ -7,6 +7,10 @@ import { createQueryTool } from "./tools/query.js";
 import { createBlastRadiusTool } from "./tools/blast-radius.js";
 import { createSubgraphTool } from "./tools/subgraph.js";
 import { createReportTool } from "./tools/report.js";
+import { createSurfaceIngestTool } from "./tools/surface-ingest.js";
+import { createSurfaceQueryTool } from "./tools/surface-query.js";
+import { createSurfaceReportTool } from "./tools/surface-report.js";
+import { createSurfaceService, type SurfaceService } from "./surface/surface-service.js";
 import { createRpcHandlers } from "./rpc-methods.js";
 import { closegraphRpc } from "../rpc/index.js";
 
@@ -28,10 +32,19 @@ export function pickGraphRoot(projectDir: string, sessionDir: string | undefined
   return sessionDir.startsWith(prefix) && sessionDir !== projectDir ? sessionDir : projectDir;
 }
 
-/** The plugin's four tools, each bound to the given services (factory form so ctx root + storage flow through).
- *  Accepts a plain GraphService (single project) or a ToolServiceScope (shared services — per-session roots). */
-export function createTools(services: ToolServices): Info[] {
-  return [createQueryTool(services), createBlastRadiusTool(services), createSubgraphTool(services), createReportTool(services)];
+/** The plugin's seven tools, each bound to the given services (factory form so ctx root + storage flow through).
+ *  Graph tools accept a plain GraphService (single project) or a ToolServiceScope (shared services — per-session roots);
+ *  surface tools bind their own SurfaceService (per-target black-box observations, no graph dependency). */
+export function createTools(services: ToolServices, surface: SurfaceService): Info[] {
+  return [
+    createQueryTool(services),
+    createBlastRadiusTool(services),
+    createSubgraphTool(services),
+    createReportTool(services),
+    createSurfaceIngestTool(surface),
+    createSurfaceQueryTool(surface),
+    createSurfaceReportTool(surface),
+  ];
 }
 
 export default Plugin.define({
@@ -66,7 +79,7 @@ export default Plugin.define({
     };
 
     const reg = await context.tool.transform((editor) => {
-      for (const tool of createTools(scope)) editor.add(tool);
+      for (const tool of createTools(scope, createSurfaceService(context.storage))) editor.add(tool);
     });
     // confirm through the live registry, not just what we pushed
     const registered = await context.tool.list();
