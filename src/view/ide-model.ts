@@ -252,7 +252,7 @@ const HELP_KEYS_LINES: readonly string[] = [
   "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
   "[6] explain  [e] explain  [o] operations  [a] ask bar  [t] chat · \"focus <ref>\" recenters",
-  "[r] refresh  [esc] close screen  [?] close help",
+  "[r] refresh  [esc] back, closes at root  [?] close help",
 ];
 
 /** `?` overlay sections — wording pinned (Task 2). Legend uses theme color NAMES

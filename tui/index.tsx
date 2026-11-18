@@ -1316,9 +1316,17 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         break
       case "back":
         key.preventDefault()
-        // esc quits the SCREEN (the model's back action is a deliberate no-op):
-        // newest root session in this project, else the home route
-        context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
+        // esc goes BACK first: pop the center history while it is non-empty
+        // (same as the header [←] back button and [u]); at the root — nothing
+        // earlier — it quits the SCREEN: newest root session in this project,
+        // else the home route (the model's back action stays a deliberate no-op)
+        if (ideState().historyDepth > 0) {
+          model().dispatch("backCenter")
+          sync()
+          settleIde()
+        } else {
+          context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
+        }
         break
       case "search":
         key.preventDefault()
@@ -1707,7 +1715,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         {barProps.s.commandBar.note ?? " "}
       </text>
       <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
-        {" h/l columns · j/k move · enter recenter · a ask · t chat · / search · ? help · esc close"}
+        {" h/l columns · j/k move · enter recenter · a ask · t chat · / search · ? help · esc back"}
       </text>
     </box>
   )
