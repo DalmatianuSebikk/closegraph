@@ -12,7 +12,7 @@ import { buildPaletteIndex, type PaletteIndex } from "./view/palette-index.js";
 import type { GraphNode } from "./graph/types.js";
 import { readFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
-import type { EgoNeighbor } from "../rpc/index.js";
+import type { EgoNeighbor, WirePair } from "../rpc/index.js";
 import type {
   EgoGraphPayload,
   EgoSourcePayload,
@@ -130,6 +130,29 @@ const EGO_SIG_CLIP = 48;
 const EGO_SINKS_CAP = 4;
 /** Lines in a lazy egoSource preview — a peek, not a dump. */
 export const EGO_SOURCE_LINES = 10;
+
+/** Distinct intra-file wire pairs carried on fileSymbols; exact total rides `wiresTotal`. */
+const WIRES_CAP = 120;
+
+/** Distinct resolved caller→callee pairs among the file's own Function/Class symbols:
+ *  deduped, self-recursion excluded, sorted (from, to), capped at WIRES_CAP. */
+function intraFileWires(handle: GraphHandle, symbols: GraphNode[]): { wires: WirePair[]; wiresTotal: number; wiresTruncated?: true } {
+  const inFile = new Set(symbols.map((n) => n.id));
+  const seen = new Set<string>();
+  const pairs: WirePair[] = [];
+  for (const n of symbols) {
+    for (const callee of handle.store.callees(n.id)) {
+      if (callee.id === n.id || !inFile.has(callee.id)) continue;
+      const key = `${n.qualifiedName}|${callee.qualifiedName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ from: n.qualifiedName, to: callee.qualifiedName });
+    }
+  }
+  pairs.sort((a, b) => (a.from === b.from ? (a.to < b.to ? -1 : 1) : a.from < b.from ? -1 : 1));
+  const wires = pairs.slice(0, WIRES_CAP);
+  return wires.length < pairs.length ? { wires, wiresTotal: pairs.length, wiresTruncated: true } : { wires, wiresTotal: pairs.length };
+}
 
 function clip(value: string, max: number): string {
   return value.length > max ? value.slice(0, max - 1) + "…" : value;
@@ -291,13 +314,13 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
     async fileSymbols(input, _ctx) {
       return guard(input, (handle) => {
         const file = handle.store.getNode(`File:${stringField(input, "file")}`);
-        if (file === undefined) return { ...provenance(handle), symbols: [] };
+        if (file === undefined) return { ...provenance(handle), symbols: [], wires: [], wiresTotal: 0 };
         const symbols = handle.store
           .nodesOfFile(file.id)
           .filter((n) => n.kind === "Function" || n.kind === "Class")
-          .sort(byQualifiedName)
-          .map((n) => symbolSummary(handle, n));
-        return { ...provenance(handle), symbols };
+          .sort(byQualifiedName);
+        const wires = intraFileWires(handle, symbols);
+        return { ...provenance(handle), symbols: symbols.map((n) => symbolSummary(handle, n)), ...wires };
       });
     },
 
