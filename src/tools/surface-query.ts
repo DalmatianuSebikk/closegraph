@@ -21,7 +21,7 @@ function noMatch(ref: string): string {
 
 function headerLine(store: SurfaceStore): string {
   const meta = store.meta();
-  return `closegraph surface — target: ${store.target} (last ingest ${meta.lastIngest}, sources: ${meta.sources.join(", ")})`;
+  return `closegraph surface — target: ${store.target} (last ingest ${meta.lastIngest}, sources: ${[...meta.sources].sort().join(", ")})`;
 }
 
 function joinCapped(refs: string[]): string {
