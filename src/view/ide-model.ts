@@ -247,12 +247,12 @@ const HELP_KEYS_LINES: readonly string[] = [
   "IDE keys",
   "[h/l] switch column  [j/k] move within column",
   "[enter] recenter  [space] collapse/expand sides",
-  "[←] back (click) · [u] prev center",
+  "[←] back button (click, dim when empty) · [u] prev center",
   "[f] fit origin  [c] center selection  [tab] cycle panel focus",
   "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
   "[6] explain  [e] explain  [o] operations  [a] ask bar  [t] chat · \"focus <ref>\" recenters",
-  "[r] refresh  [esc] back  [?] close help",
+  "[r] refresh  [esc] close screen  [?] close help",
 ];
 
 /** `?` overlay sections — wording pinned (Task 2). Legend uses theme color NAMES

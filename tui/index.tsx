@@ -1552,22 +1552,20 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   const HeaderView = (headerProps: { s: IdeState }) => (
     <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
       <box flexDirection="row" height={1} flexShrink={0}>
-        {/* back affordance: history pop when the center history is non-empty, else
-            the esc-family quit destination; the breadcrumb shifts right 2 cols */}
+        {/* back BUTTON: walks the center history ONLY — a safe back that never
+            closes the screen (esc/q keep the close role); dimmed when there is
+            nothing earlier to return to */}
         <text
           height={1}
-          fg={IDE_THEME.cyan}
+          fg={headerProps.s.historyDepth > 0 ? IDE_THEME.cyan : IDE_THEME.textMuted}
           onMouseDown={() => {
-            if (ideState().historyDepth > 0) {
-              model().dispatch("backCenter")
-              sync()
-              settleIde()
-            } else {
-              context.ui.router.navigate(quitDestination(context.data.session.list(), context.location?.directory))
-            }
+            if (headerProps.s.historyDepth === 0) return
+            model().dispatch("backCenter")
+            sync()
+            settleIde()
           }}
         >
-          {" ← "}
+          {" [←] back "}
         </text>
         <text height={1} attributes={TextAttributes.BOLD} fg={IDE_THEME.cyan}>
           {headerProps.s.header.breadcrumb}
@@ -1709,7 +1707,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         {barProps.s.commandBar.note ?? " "}
       </text>
       <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
-        {" h/l columns · j/k move · enter recenter · a ask · t chat · / search · ? help · esc back"}
+        {" h/l columns · j/k move · enter recenter · a ask · t chat · / search · ? help · esc close"}
       </text>
     </box>
   )
