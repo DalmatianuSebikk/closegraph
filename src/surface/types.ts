@@ -103,7 +103,8 @@ export interface StoredObservation extends Observation {
   readonly batch: number;
   /** The citable id: `batch:<batch>/${id}`. */
   readonly storedId: string;
-  readonly outOfScope: boolean;
+  /** Mutable scope flag, recomputed in place on scope change (SurfaceNode parity). */
+  outOfScope: boolean;
   readonly endpointQn: string;
   readonly pageQn?: string;
 }
