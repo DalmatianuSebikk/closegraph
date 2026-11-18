@@ -15,7 +15,7 @@ change it, and where the risky spots are — without hallucinated answers.
 
 | Surface | What it does |
 |---|---|
-| `/closegraph` (IDE screen) | Pixel-styled code-graph IDE: function cards wired **callers ← focus → callees** (depth 2, caps always disclosed), sidebar with category filters + minimap, inspector (facts, call relations, risk, sinks), 5-key command bar. Bare `/closegraph` opens a symbol picker first |
+| `/closegraph` (IDE screen) | Pixel-styled code-graph IDE: function cards wired **callers ← focus → callees** (depth 2, caps always disclosed), sidebar with category filters + minimap, inspector (facts, call relations, risk, sinks), 5-key command bar. Bare `/closegraph` opens the file list — files by risk → their functions as wired cards → focus view |
 | In the IDE screen | `←` / `u` walks focus history · `?` legend + how-it-works · `[6]`/`e` **explain this function** (agent-written, labeled as generated, cached) · `t` **chat sidebar** — ask your agent with the focused card attached; `focus <ref>` recenters · `o` **operations menu** — refactor / tests / docs / harden (risk-gated), sent through chat |
 | Classic graph screen | File map with risk shading → symbols → detail → ego graph — still there via the command palette ("Open CodeGraph") |
 | `p` in the TUI | **Jump palette** — fuzzy-ish prefix search, arrows to move, type to filter |
