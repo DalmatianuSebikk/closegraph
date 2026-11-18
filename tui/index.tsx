@@ -1,7 +1,7 @@
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import { TextAttributes } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createEffect, createSignal, onMount } from "solid-js"
+import { createEffect, createSignal, onMount, type JSX } from "solid-js"
 import { createFileMapModel, RISK_SHADING, type FileMapState } from "../src/view/file-map-model.js"
 import { createSymbolViewModel, SYMBOL_VIEW_KEYMAP, type SymbolViewState } from "../src/view/symbol-view-model.js"
 import { createDetailModel, DETAIL_KEYMAP, type DetailState } from "../src/view/detail-model.js"
@@ -15,6 +15,7 @@ import {
   SEPARATOR_W,
   HEADER_ROWS,
   COMMAND_ROWS,
+  ASK_ROWS,
   type IdeState,
 } from "../src/view/ide-model.js"
 import { IDE_THEME } from "../src/view/ide-theme.js"
@@ -1259,20 +1260,16 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       return
     }
 
-    // chat sidebar third (Task 4): palette-style capture — while open, EVERY
-    // key is swallowed (typing/scroll/submit/close); nothing leaks into
-    // navigation. esc always closes; t closes only with an EMPTY draft
-    // (otherwise it types); enter submits; arrows scroll the transcript.
-    if (ideState().chat !== undefined) {
+    // ask bar capture: while focused, every key is swallowed (palette-style) —
+    // printables/backspace edit the shared chat draft, enter submits (a send
+    // result routes through sendChat; the transcript is already open beside
+    // the bar), arrows scroll the transcript, esc blurs (the draft is kept).
+    if (ideState().ask.focused) {
       key.preventDefault()
       const m = model()
-      const closeChat = () => {
-        m.chatClose()
-        setChatOpen(false)
-        sync()
-      }
       if (key.name === "escape" || key.name === "esc") {
-        closeChat()
+        m.askBlur()
+        sync()
         return
       }
       if (key.name === "up") {
@@ -1306,11 +1303,8 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       }
       const typed = printable(key)
       if (typed !== undefined) {
-        if (typed === "t" && m.state().chat?.input === "") closeChat()
-        else {
-          m.chatType(typed)
-          sync()
-        }
+        m.chatType(typed)
+        sync()
       }
       return
     }
@@ -1399,17 +1393,52 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
-  /** D4: panel separators are CHARACTER columns (│), never border* props. Each
-   *  costs SEPARATOR_W — the model's vw budgets it (Task-6 render delta). */
-  const Separator = () => (
-    <box flexDirection="column" width={SEPARATOR_W} flexShrink={0}>
-      {...Array.from({ length: Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS) }, () => (
-        <text width={1} height={1} flexShrink={0} fg={IDE_THEME.borderSubtle}>
-          │
+  /** Full borders + title around a right/sidebar panel (UX round: panels were
+   *  not delimited enough). Character-drawn per D4 — never border* props. The
+   *  content area is the panel width minus the two │ columns; the body rows
+   *  are the viewport height minus the two border rows. */
+  const PanelBox = (panelProps: { title: string; width?: number; flexGrow?: boolean; children: JSX.Element }) => {
+    const w = panelProps.width ?? dims().width
+    const title = ` ${panelProps.title} `
+    const top = `╭${title}${"─".repeat(Math.max(0, w - 2 - title.length))}╮`
+    const bottom = `╰${"─".repeat(Math.max(0, w - 2))}╯`
+    const bodyRows = Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS - 2)
+    return (
+      <box
+        flexDirection="column"
+        width={panelProps.flexGrow === true ? undefined : w}
+        flexGrow={panelProps.flexGrow === true ? 1 : undefined}
+        flexShrink={0}
+        backgroundColor={IDE_THEME.panel}
+      >
+        <text width={w} height={1} flexShrink={0} fg={IDE_THEME.border}>
+          {top}
         </text>
-      ))}
-    </box>
-  )
+        <box flexDirection="row" flexShrink={0}>
+          <box flexDirection="column" width={1} flexShrink={0}>
+            {...Array.from({ length: bodyRows }, () => (
+              <text width={1} height={1} flexShrink={0} fg={IDE_THEME.border}>
+                │
+              </text>
+            ))}
+          </box>
+          <box flexDirection="column" width={w - 2} flexShrink={0}>
+            {panelProps.children}
+          </box>
+          <box flexDirection="column" width={1} flexShrink={0}>
+            {...Array.from({ length: bodyRows }, () => (
+              <text width={1} height={1} flexShrink={0} fg={IDE_THEME.border}>
+                │
+              </text>
+            ))}
+          </box>
+        </box>
+        <text width={w} height={1} flexShrink={0} fg={IDE_THEME.border}>
+          {bottom}
+        </text>
+      </box>
+    )
+  }
 
   const headerRepoLabel = (s: IdeState): string => {
     if (repoBase === undefined) return s.header.repoLabel
@@ -1571,12 +1600,12 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
   )
 
   const SidebarView = (sideProps: { sidebar: NonNullable<IdeState["sidebar"]> }) => (
-    <box flexDirection="column" width={SIDEBAR_W} flexShrink={0} backgroundColor={IDE_THEME.panel}>
+    <PanelBox title="Explorer" width={SIDEBAR_W}>
       {/* lines + minimap share the body height: the minimap keeps its rows and the
           lines take the rest (D1 model windowing — no scrollbox) */}
       {(() => {
         const minimapRows = toSegments(sideProps.sidebar.minimap, sideProps.sidebar.minimap[0]?.length ?? 0)
-        const budget = Math.max(0, Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS) - minimapRows.length)
+        const budget = Math.max(0, Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS - 2) - 2 - minimapRows.length)
         return [
           ...sideProps.sidebar.lines.slice(0, budget).map((line) => (
             <text width="100%" height={1} flexShrink={0} fg={line.fg}>
@@ -1586,17 +1615,11 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
           ...minimapRows.map((row) => <SegmentRow row={row} />),
         ]
       })()}
-    </box>
+    </PanelBox>
   )
 
   const InspectorView = (inspProps: { inspector: NonNullable<IdeState["inspector"]>; overlay: boolean }) => (
-    <box
-      flexDirection="column"
-      width={inspProps.overlay ? undefined : INSPECTOR_W}
-      flexGrow={inspProps.overlay ? 1 : undefined}
-      flexShrink={0}
-      backgroundColor={IDE_THEME.panel}
-    >
+    <PanelBox title={inspProps.inspector.title} width={inspProps.overlay ? undefined : INSPECTOR_W} flexGrow={inspProps.overlay}>
       {/* flattened sections (title fg cyan + lines), windowed by the model's scroll
           offset over its vh height — caller/callee lines carry refs and re-center */}
       {(() => {
@@ -1617,14 +1640,15 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
           </text>
         ))
       })()}
-    </box>
+    </PanelBox>
   )
 
-  /** Task 4 chat sidebar: pinned header hint, the role-prefixed transcript
-   *  windowed from the bottom (scroll = lines up from the latest; `+N earlier`
-   *  discloses the capped tail), and the input line with a block cursor.
-   *  Assistant text is labeled by the `agent:` prefix (generated content);
-   *  muted lines are the model's honest local notes (degrades, no context). */
+  /** Task 4 chat sidebar (UX round: transcript only — typing lives in the
+   *  persistent ask bar below the canvas). Pinned header hint, role-prefixed
+   *  transcript windowed from the bottom (scroll = lines up from the latest;
+   *  `+N earlier` discloses the capped tail). Assistant text is labeled by the
+   *  `agent:` prefix (generated content); muted lines are the model's honest
+   *  local notes (degrades, no context). */
   const ChatView = (chatProps: { chat: NonNullable<IdeState["chat"]>; overlay: boolean }) => {
     const visible = () => {
       const lines: { text: string; fg?: string }[] = []
@@ -1636,21 +1660,12 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
           lines.push({ text: (i === 0 ? prefix : " ".repeat(prefix.length)) + part, fg })
         })
       }
-      const body = Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS - 2)
+      const body = Math.max(1, dims().height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS - 4)
       const start = Math.max(0, lines.length - body - chatProps.chat.scroll)
       return lines.slice(start, start + body)
     }
     return (
-      <box
-        flexDirection="column"
-        width={chatProps.overlay ? undefined : INSPECTOR_W}
-        flexGrow={chatProps.overlay ? 1 : undefined}
-        flexShrink={0}
-        backgroundColor={IDE_THEME.panel}
-      >
-        <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
-          {"chat — t closes · enter sends · focus <ref> recenters"}
-        </text>
+      <PanelBox title="Chat" width={chatProps.overlay ? undefined : INSPECTOR_W} flexGrow={chatProps.overlay}>
         <box flexDirection="column" flexGrow={1}>
           {...visible().map((line) => (
             <text width="100%" height={1} flexShrink={0} fg={line.fg}>
@@ -1658,8 +1673,24 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
             </text>
           ))}
         </box>
-        <text width="100%" height={1} flexShrink={0}>
-          {`▸ ${chatProps.chat.input}█${chatProps.chat.status === "sending" ? " …" : ""}`}
+      </PanelBox>
+    )
+  }
+
+  /** Persistent ask-AI bar (UX round): the single input row above the command
+   *  bar. Focused (a): a block-cursor prompt typing into the shared chat draft
+   *  — enter sends (transcript streams in the Chat panel), esc blurs. Unfocused
+   *  with a draft: the draft still shows; otherwise a muted hint. */
+  const AskBar = (askProps: { s: IdeState }) => {
+    const a = askProps.s.ask
+    const body =
+      a.focused || a.input !== ""
+        ? `${a.focused ? "▸ ask " : "  ask "}${a.input}${a.focused ? "█" : ""}${a.status === "sending" ? " …" : ""}`
+        : "  a ask the agent · t transcript · enter sends · esc blurs"
+    return (
+      <box flexDirection="row" height={ASK_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panelElevated}>
+        <text width="100%" height={1} flexShrink={0} fg={a.focused ? IDE_THEME.cyan : IDE_THEME.textMuted}>
+          {body}
         </text>
       </box>
     )
@@ -1678,7 +1709,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         {barProps.s.commandBar.note ?? " "}
       </text>
       <text width="100%" height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
-        {" h/l columns · j/k move · enter recenter · space collapse · / search · ? help · esc back"}
+        {" h/l columns · j/k move · enter recenter · a ask · t chat · / search · ? help · esc back"}
       </text>
     </box>
   )
@@ -1709,10 +1740,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
             <HeaderView s={s} />
             <box flexDirection="row" flexGrow={1}>
               {s.sidebar !== undefined ? (
-                <>
-                  <SidebarView sidebar={s.sidebar} />
-                  <Separator />
-                </>
+                <SidebarView sidebar={s.sidebar} />
               ) : (
                 []
               )}
@@ -1734,19 +1762,14 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
                 </box>
               )}
               {!chatOverlay && !overlayInspector && s.chat !== undefined ? (
-                <>
-                  <Separator />
-                  <ChatView chat={s.chat} overlay={false} />
-                </>
+                <ChatView chat={s.chat} overlay={false} />
               ) : !chatOverlay && !overlayInspector && s.inspector !== undefined ? (
-                <>
-                  <Separator />
-                  <InspectorView inspector={s.inspector} overlay={false} />
-                </>
+                <InspectorView inspector={s.inspector} overlay={false} />
               ) : (
                 []
               )}
             </box>
+            <AskBar s={s} />
             <CommandBar s={s} />
           </>
         )

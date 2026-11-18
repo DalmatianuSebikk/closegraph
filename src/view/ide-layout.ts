@@ -26,7 +26,7 @@
  * this); the render layer passes them to OpenTUI which parses hex.
  */
 import type { RiskBucket } from "./risk.js";
-import { IDE_THEME, UNICODE_GLYPHS, categoryColor, riskColor, type GlyphSet } from "./ide-theme.js";
+import { IDE_THEME, UNICODE_GLYPHS, categoryColor, kindColor, riskColor, type GlyphSet } from "./ide-theme.js";
 
 export interface Cell {
   char: string;
@@ -42,6 +42,8 @@ export interface IdeCard {
   ref: string;
   name: string;
   category: string;
+  /** node kind — the card's accent color (kindColor); undefined on placeholders */
+  kind?: "Function" | "Class" | "File";
   file: string;
   startLine: number; // 0 → "—"
   signature?: string;
@@ -246,7 +248,8 @@ function paintCard(cells: (Cell | undefined)[][], pc: PositionedCard, w: number,
   const { card, x, y } = pc;
   const placeholder = card.placeholder !== undefined;
   const catColor = categoryColor(card.category);
-  const borderFg = placeholder ? IDE_THEME.edgeCollapsed : selected ? IDE_THEME.selectedBorder : isCenter ? IDE_THEME.cyan : catColor;
+  const accent = kindColor(card.kind);
+  const borderFg = placeholder ? IDE_THEME.edgeCollapsed : selected ? IDE_THEME.selectedBorder : isCenter ? IDE_THEME.cyan : accent;
   const bg = selected ? IDE_THEME.selectedBackground : IDE_THEME.background;
   const border = (char: string): Cell => ({ char, fg: borderFg, bg: IDE_THEME.background, ref: card.ref });
   const put = (row: number, colN: number, cell: Cell): void => {
@@ -282,7 +285,7 @@ function paintCard(cells: (Cell | undefined)[][], pc: PositionedCard, w: number,
   const catLabel = `[${card.category.slice(0, 8).toUpperCase()}]`;
   const nameFit = fit(card.name, w - 6 - catLabel.length, glyphs.ellipsis);
   put(y + 1, x + 1, { char: " ", fg: IDE_THEME.text, bg, ref: card.ref });
-  put(y + 1, x + 2, { char: glyphs.dot, fg: catColor, bg, ref: card.ref });
+  put(y + 1, x + 2, { char: glyphs.dot, fg: accent, bg, ref: card.ref });
   put(y + 1, x + 3, { char: " ", fg: IDE_THEME.text, bg, ref: card.ref });
   for (let i = 0; i < nameFit.length; i++) put(y + 1, x + 4 + i, { char: nameFit[i] as string, fg: IDE_THEME.text, bg, bold: true, ref: card.ref });
   for (let i = 0; i < catLabel.length; i++) put(y + 1, x + 4 + nameFit.length + i, { char: catLabel[i] as string, fg: catColor, bg, ref: card.ref });

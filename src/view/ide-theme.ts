@@ -77,6 +77,17 @@ export function categoryColor(category: string): string {
   return CATEGORY_ORDER[sum % CATEGORY_ORDER.length] as string;
 }
 
+/** Node-kind accent colors (kind-colored cards): every Function/Class/File card
+ *  border and ◆ dot uses its kind color; the directory-category color stays on
+ *  the [CAT] text label. Deterministic — a kind always maps to one color. */
+export type NodeKind = "Function" | "Class" | "File";
+
+export function kindColor(kind: NodeKind | undefined): string {
+  if (kind === "Class") return IDE_THEME.purple;
+  if (kind === "File") return IDE_THEME.green;
+  return IDE_THEME.cyan; // Function (and undefined — placeholders' fallback)
+}
+
 export function riskColor(bucket: "low" | "medium" | "high"): string {
   if (bucket === "high") return IDE_THEME.riskHigh;
   if (bucket === "medium") return IDE_THEME.riskMedium;

@@ -54,7 +54,7 @@ import {
 } from "./ide-agent.js";
 import type { Dims } from "./file-map-model.js";
 import { HISTORY_CAP, LIST_CAP } from "./ego-model.js";
-import { IDE_THEME, categoryColor, categoryOf } from "./ide-theme.js";
+import { IDE_THEME, categoryColor, categoryOf, kindColor, riskColor } from "./ide-theme.js";
 import {
   CARD_MID_ROW,
   ideLayout,
@@ -76,20 +76,26 @@ export const INSPECTOR_W = 39;
 export const SEPARATOR_W = 1;
 export const HEADER_ROWS = 3;
 export const COMMAND_ROWS = 3;
+/** The persistent bottom ask-AI bar (input line) — subtracted from the body
+ *  height like HEADER/COMMAND rows; the route renders it above the CommandBar. */
+export const ASK_ROWS = 1;
+/** Border box chrome (top + bottom rows) around the right/sidebar panels — the
+ *  inspector's visible line budget is its height minus this. */
+export const PANEL_CHROME_ROWS = 2;
 
 export type IdeAction =
   | "left" | "right" | "up" | "down" | "open" | "collapse" | "cyclePanel" | "search"
   | "depthUp" | "depthDown" | "fit" | "center" | "toggleInspector" | "toggleMinimap" | "toggleSidebar"
   | "help" | "back" | "backCenter" | "refresh"
   | "command1" | "command2" | "command3" | "command4" | "command5" | "command6"
-  | "explain" | "chat" | "ops";
+  | "explain" | "chat" | "ops" | "ask";
 
 export const IDE_ACTIONS: readonly IdeAction[] = [
   "left", "right", "up", "down", "open", "collapse", "cyclePanel", "search",
   "depthUp", "depthDown", "fit", "center", "toggleInspector", "toggleMinimap", "toggleSidebar",
   "help", "back", "backCenter", "refresh",
   "command1", "command2", "command3", "command4", "command5", "command6",
-  "explain", "chat", "ops",
+  "explain", "chat", "ops", "ask",
 ];
 
 export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
@@ -128,6 +134,10 @@ export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
    *  the route captures keys palette-style (item keys pick, j/k move, enter
    *  picks, esc closes); synthetic focus / miss screen never open it. */
   ops: ["o"],
+  /** Persistent ask-AI bar: a focuses the bottom input (opens the chat
+   *  transcript beside it); while focused the route captures keys palette-style
+   *  (printables type, enter submits, esc blurs — the draft is kept). */
+  ask: ["a"],
 };
 
 export interface InspectorSection {
@@ -167,6 +177,10 @@ export interface IdeState {
    *  is the highlighted row. Every pick closes it; a payload swap closes it —
    *  the menu's basis is the focus it was opened on. */
   ops?: { items: OpItem[]; cursor: number };
+  /** Persistent ask-AI bar (always rendered by the route above the command
+   *  bar): focus flag + the shared chat draft/status so the bar shows the
+   *  input even while the t-sidebar transcript is closed. */
+  ask: { focused: boolean; input: string; status: "idle" | "sending" };
   help?: IdeHelpSection[];
   miss?: { lines: { text: string; muted?: boolean }[] };
   selectedRef?: string;
@@ -237,7 +251,7 @@ const HELP_KEYS_LINES: readonly string[] = [
   "[f] fit origin  [c] center selection  [tab] cycle panel focus",
   "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
-  "[6] explain  [e] explain  [o] operations  [t] chat · \"focus <ref>\" recenters",
+  "[6] explain  [e] explain  [o] operations  [a] ask bar  [t] chat · \"focus <ref>\" recenters",
   "[r] refresh  [esc] back  [?] close help",
 ];
 
@@ -248,7 +262,8 @@ const HELP_SECTIONS: readonly { title: string; lines: readonly string[] }[] = [
   {
     title: "LEGEND",
     lines: [
-      "card border color = category (purple coral green cyan amber · first path segment)",
+      "card border / ◆ / minimap color = kind: function cyan · class purple · file green",
+      "[CAT] label color = directory category (purple coral green cyan amber · first path segment)",
       "Risk: LOW green · MED amber · HIGH coral    → callers (muted) · → callees (cyan)",
       "selected = coral border · ┄ dashed card = hidden-count placeholder",
     ],
@@ -293,6 +308,7 @@ function toCard(n: EgoNeighbor): IdeCard {
     ref: n.ref,
     name: shortName(n.ref),
     category: categoryOf(n.file),
+    kind: n.kind,
     file: n.file,
     startLine: n.startLine,
     ...(n.signature !== undefined ? { signature: n.signature } : {}),
@@ -437,12 +453,15 @@ export function createIdeModel(deps: {
   let localEchoes: ChatTurn[] = [];
   let chatTurns: ChatTurn[] = [];
   let chatEarlier = 0;
+  /** Persistent ask-AI bar focus: while true the route captures keys into the
+   *  chat input (the SAME draft the t-sidebar shows) — enter submits, esc blurs. */
+  let askFocused = false;
   /** Task 5 operations overlay: present while open. Undefined = closed; every
    *  pick closes it and a payload swap closes it (see apply). */
   let ops: { items: OpItem[]; cursor: number } | undefined;
 
   function viewportHeight(): number {
-    return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS);
+    return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS);
   }
 
   /** Panel availability/visibility + the resulting viewport width. The viewport is
@@ -1203,24 +1222,44 @@ export function createIdeModel(deps: {
         }
       }
     }
-    const security: InspectorSection = { title: "SECURITY ANALYSIS", lines: [] };
-    if (d.risk.because.length === 0) security.lines.push({ text: "—", fg: muted });
+    const security: InspectorSection = { title: "RISK ANALYSIS", lines: [] };
+    const bucketWord = d.risk.bucket === "high" ? "HIGH" : d.risk.bucket === "medium" ? "MEDIUM" : "LOW";
+    security.lines.push({ text: `bucket: ${bucketWord}`, fg: riskColor(d.risk.bucket) });
+    if (d.risk.because.length === 0) security.lines.push({ text: "no structural risk signals — low fan-in, no sinks", fg: muted });
     else for (const line of d.risk.because) security.lines.push({ text: line });
+    security.lines.push({ text: `fan-in: ${d.callers.length} direct · fan-out: ${d.callees.length} direct` });
     const sinks = d.dangerousCalls ?? [];
     if (sinks.length === 0) security.lines.push({ text: "sinks: —", fg: muted });
-    else for (const sink of sinks) security.lines.push({ text: `${sink.name} ×${sink.count}` });
+    else {
+      security.lines.push({ text: "sinks:" });
+      for (const sink of sinks) security.lines.push({ text: `  ${sink.name} ×${sink.count}` });
+    }
     security.lines.push({ text: `unresolved outbound calls: ${d.unresolvedCount}` });
     security.lines.push({ text: "guards: —", fg: muted });
     security.lines.push({ text: "confidence: static — ts-morph resolved" });
     const why: InspectorSection = {
       title: "WHY IT MATTERS",
-      lines: [
-        { text: d.risk.because[0] ?? "—" },
-        {
-          text: `${d.node.name} has ${d.callers.length} direct caller${d.callers.length === 1 ? "" : "s"} — a flaw here ripples outward to every caller.`,
-        },
-      ],
+      lines: [],
     };
+    for (const line of d.risk.because) why.lines.push({ text: line });
+    if (d.callers.length === 0) {
+      why.lines.push({
+        text: `no direct callers — ${d.node.exported ? "an exported entry point (or dead code): changes land at the module boundary" : "dead code candidate: changes cannot ripple through this graph"}`,
+      });
+    } else {
+      why.lines.push({
+        text: `${d.node.name} has ${d.callers.length} direct caller${d.callers.length === 1 ? "" : "s"} — a flaw here ripples outward to every caller.`,
+      });
+    }
+    if (d.node.exported && d.callers.length > 0) why.lines.push({ text: "exported — part of the module's public surface; a breaking change hits every importer" });
+    if (sinks.length > 0) {
+      const names = sinks.map((s) => s.name).join(", ");
+      why.lines.push({ text: `calls dangerous sinks (${names}) — validate inputs and check guards before touching this code` });
+    }
+    if (d.unresolvedCount > 0) {
+      why.lines.push({ text: `${d.unresolvedCount} unresolved call${d.unresolvedCount === 1 ? "" : "s"} — behavior may depend on code this graph cannot see` });
+    }
+    if (why.lines.length === 0) why.lines.push({ text: "—", fg: muted });
     return [general, describeSection(ref), relations, analysis, security, why];
   }
 
@@ -1230,6 +1269,11 @@ export function createIdeModel(deps: {
       { text: "[enter] recenter [u] prev center", fg: IDE_THEME.textMuted },
       { text: "[space] collapse [f] fit [c] center", fg: IDE_THEME.textMuted },
       { text: "[h/l] columns [j/k] move [?] help", fg: IDE_THEME.textMuted },
+      { text: "" },
+      { text: "Kinds" },
+      { text: "◆ function", fg: kindColor("Function") },
+      { text: "◆ class", fg: kindColor("Class") },
+      { text: "◆ file", fg: kindColor("File") },
       { text: "" },
       { text: "Categories" },
     ];
@@ -1244,7 +1288,6 @@ export function createIdeModel(deps: {
     if (showMinimap) lines.push({ text: "" }, { text: "Minimap" });
     return lines;
   }
-
   function commandBarState(note: string | undefined): IdeState["commandBar"] {
     return {
       actions: COMMAND_BAR.map((c, i) => ({ key: c.key, label: c.label, active: lastCommand === i + 1 })),
@@ -1322,6 +1365,7 @@ export function createIdeModel(deps: {
 
   function chatClose(): void {
     chatOpen = false; // the transcript survives — closing never clears it
+    askFocused = false; // an input bar with no visible transcript would strand focus
   }
 
   function chatState(): NonNullable<IdeState["chat"]> {
@@ -1403,6 +1447,7 @@ export function createIdeModel(deps: {
       ...(helpOpen ? { help: HELP_SECTIONS.map((s) => ({ title: s.title, lines: [...s.lines] })) } : {}),
       ...(chatOpen ? { chat: chatState() } : {}),
       ...(ops !== undefined ? { ops: { items: ops.items.map((i) => ({ ...i })), cursor: ops.cursor } } : {}),
+      ask: { focused: askFocused, input: chatInput, status: chatStatus },
       focusRef,
       depth,
       historyDepth: history.length,
@@ -1451,10 +1496,10 @@ export function createIdeModel(deps: {
       const showMinimap = !minimapOff && fullCanvas !== undefined;
       let minimap: (Cell | undefined)[][] = [];
       if (showMinimap && fullCanvas !== undefined) {
-        const categoryByRef = new Map<string, string>();
+        const kindByRef = new Map<string, NonNullable<IdeCard["kind"]>>();
         for (const col of columns) {
           for (const card of col.cards) {
-            if (card.placeholder === undefined) categoryByRef.set(card.ref, card.category);
+            if (card.placeholder === undefined && card.kind !== undefined) kindByRef.set(card.ref, card.kind);
           }
         }
         const rects = [...fullCanvas.cardRects].map(([ref, rect]) => ({ ...rect, ref }));
@@ -1466,8 +1511,8 @@ export function createIdeModel(deps: {
           MINIMAP_H,
           { x: scrollX, y: scrollY, w: Math.min(lay.vw, fullCanvas.width), h: Math.min(vh, fullCanvas.height) },
           (ref) => {
-            const category = categoryByRef.get(ref);
-            return category === undefined ? undefined : categoryColor(category);
+            const kind = kindByRef.get(ref);
+            return kind === undefined ? undefined : kindColor(kind);
           },
         );
       }
@@ -1483,7 +1528,7 @@ export function createIdeModel(deps: {
         title: selected === undefined ? "Inspector" : `Inspector — ${isSynthetic(selected) ? "summary" : shortName(selected)}`,
         sections,
         scroll: inspScroll,
-        height: vh,
+        height: Math.max(1, vh - PANEL_CHROME_ROWS),
       };
     }
 
@@ -1633,6 +1678,15 @@ export function createIdeModel(deps: {
         case "ops":
           openOps();
           break;
+        case "ask":
+          // a: focus the bottom bar — the transcript opens beside it so the
+          // reply streams visibly; reopening re-pins to the latest turn
+          if (!askFocused) {
+            askFocused = true;
+            chatOpen = true;
+            chatScrollPos = 0;
+          }
+          break;
       }
     },
 
@@ -1681,6 +1735,12 @@ export function createIdeModel(deps: {
     opsMove,
     opsClose,
     opsPick,
+
+    // Persistent ask-AI bar: focus stays until esc (or a chat close); the draft
+    // and submit ride the chat family (chatType/chatBackspace/chatSubmit).
+    askBlur(): void {
+      askFocused = false;
+    },
 
     state,
 
