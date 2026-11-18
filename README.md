@@ -24,6 +24,7 @@ change it, and where the risky spots are — without hallucinated answers.
 | `closegraph_blast_radius` (tool) | *What breaks if I change this?* — transitive callers, bounded output |
 | `closegraph_subgraph` (tool) | Ego graph around 1–5 seeds, hard line cap so hubs can't flood context |
 | `closegraph_report` (tool) | One-call overview: counts, resolution rate, top fan-in hubs, entry points |
+| `closegraph_surface_*` (tools) | **Black-box attack surface**: ingest RAW observations (puppeteer/burp) → pages, functionalities, endpoints, params, cookies, auth evidence — query + report over them, scope-aware |
 
 Everything the graph says is **deterministic** — parsed with ts-morph's type
 checker, not guessed by a model. Stale graph? It tells you.
@@ -81,6 +82,7 @@ has Finding nodes waiting.
 - ✅ Plan 4 — agent experience (batch query, report tool, steering, export + hook)
 - ✅ CodeGraph IDE screen — pixel-accurate graph IDE (cards, edges, inspector, honesty rules) + agent round: symbol-picker entry, back button, `?` info overlay, explain, chat sidebar, operations menu
 - ✅ Plan 5 — language packs (Python, PHP, bash shipped; Go/C++/Rust to follow)
+- ✅ Black-box surface (Round A) — observation ingest + surface query/report tools; Round B TUI view next
 - 🔜 Plan 6 — deterministic rules layer (Finding nodes + reachability)
 - 🔮 Later — black-box attack-surface mode (endpoints/params as graph nodes)
 

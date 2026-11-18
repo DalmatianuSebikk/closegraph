@@ -19,6 +19,9 @@ whole files to understand structure or impact.
 | `closegraph_query` | Facts for 1–10 symbols per call: kind, file, signature, exported flag, direct callers and callees. Batch the refs you care about. |
 | `closegraph_blast_radius` | Impact: everything that can break when a symbol changes — transitive callers (`direction callers`, default), depth-bounded callees (`callees`), or both. |
 | `closegraph_subgraph` | The bounded ego graph around 1–5 seeds: nodes grouped by file, edge list, `depth` and `limit` caps. |
+| `closegraph_surface_ingest` | Black-box surface: store RAW observations (method, url, params, status, cookies) for one target — exactly as observed, tagged with source. Claims (functionalities, wiring) cite observation ids from this call or stored ones. |
+| `closegraph_surface_query` | One surface node by ref: functionality `page-url :: name`, page url, endpoint `METHOD /path`, or bare path (disambiguates). Facts: provenance, params, cookies, auth evidence, calling functionalities. |
+| `closegraph_surface_report` | Surface orientation: every target with counts, or one target's scope, freshness, method mix, auth-gated endpoints, out-of-scope discoveries, unmapped endpoints. |
 
 **Ref format:** `src/lib/util.ts#formatName` (qualifiedName). Bare symbol names
 (`formatName`, `Calculator.add`) and file paths (`src/lib/util.ts`) also resolve —
@@ -35,6 +38,35 @@ output carries a freshness note (`graph freshness unknown (no git HEAD)`), numbe
 may lag recent edits — re-verify critical facts by reading the named file. Long
 lists are capped on purpose (`… +N more`): narrow the query, or raise `limit`
 (max 200) on `closegraph_blast_radius` / `closegraph_subgraph`.
+
+## Black-box surface workflow (web targets)
+
+The `closegraph_surface_*` tools map a running target's attack surface from raw
+observations — no fetching by the plugin, the agent collects. Four steps:
+
+1. **Collect** — puppeteer: open the scope URLs, click through the target's
+   functionalities (login, add-to-cart, settings…), note every XHR/fetch it
+   fires. Or burp: `get_proxy_http_history` / `get_proxy_websocket_history` /
+   `get_organizer_items`. Record method, full url, params (with location),
+   response status, Set-Cookie names, and the page url you were on for
+   document-driven requests.
+2. **Ingest** — `closegraph_surface_ingest` with the RAW observations, each
+   tagged `source` (`puppeteer`, `burp-proxy`, `openapi`…). Then attach
+   semantics as claims: functionalities (`name`, `pageUrl`, `description`,
+   `evidence` citing the observation ids just ingested) and wiring
+   (`from`/`to` functionality names). `scope` (url-prefix rules) REPLACES the
+   target's scope and is echoed back — set it from the user's words only.
+3. **Orient** — `closegraph_surface_report` (no target lists all targets; with
+   target: scope, freshness, method mix, auth-gated endpoints, out-of-scope
+   discoveries, unmapped endpoints). Drill with `closegraph_surface_query`.
+4. **Verify** — burp `send_http1_request` / `send_http2_request` to confirm a
+   hypothesis about an endpoint; hand interesting requests to the user via
+   `create_repeater_tab` / `send_to_intruder`. Scope is the user's — never
+   widen it silently; out-of-scope discoveries stay flagged, not merged.
+
+Observations are the ground truth: record what you saw, not what you assume.
+Ids are stable across sessions (stored, deduped by signature) — later claims
+may cite earlier evidence.
 
 ## CLI: export a committable graph.json + post-commit freshness
 
