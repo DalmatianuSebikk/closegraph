@@ -14,7 +14,7 @@ import type { GraphEdge, GraphNode } from "../graph/types.js";
 // The contract semantic is "a tree-sitter syntax node" either way.
 import type { Node as SyntaxNode } from "web-tree-sitter";
 
-export type LanguageId = "python" | "php" | "bash"; // Wave 2 adds "go" | "cpp" | "rust"
+export type LanguageId = "python" | "php" | "bash" | "go"; // Wave 2 adds "cpp" | "rust"
 
 export interface SinkSpec {
   readonly callee: string; // match + display text, e.g. "pickle.loads", "include $path"
