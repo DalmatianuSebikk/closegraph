@@ -19,14 +19,15 @@
  * index; a pack with zero discovered files never loads its grammar at all
  * (lazy-by-construction pin from the runtime).
  */
-import { join } from "node:path";
+import { join, resolve as resolvePath, sep } from "node:path";
+import { readFileSync } from "node:fs";
 import type { GraphStore } from "../graph/store.js";
 import type { GraphEdge } from "../graph/types.js";
 import { makeNodeId, makeQualifiedName } from "../graph/types.js";
 import { allPacks } from "../packs/registry.js";
 import { discoverPackFiles } from "../packs/discover.js";
 import { GrammarMissingError, loadParser } from "../packs/runtime.js";
-import type { ExternalCallRef, LanguagePack, PackExtraction } from "../packs/types.js";
+import type { ExternalCallRef, LanguagePack, PackExtraction, PackResolveCtx } from "../packs/types.js";
 import type { LanguageRunMetrics } from "./pipeline.js";
 
 export interface PackPassResult {
@@ -37,6 +38,33 @@ export interface PackPassResult {
 interface FilePass {
   relPath: string;
   extraction: PackExtraction;
+}
+
+/** PackResolveCtx factory (design D1): readable walked files + their extractions
+ *  + a cached sync reader that serves ANY repo-relative path (manifests like
+ *  go.mod are never walked) and refuses paths that escape the root. */
+function makeCtx(repoRoot: string, records: FilePass[], sources: Map<string, string>): PackResolveCtx {
+  const rootAbs = resolvePath(repoRoot);
+  const cache = new Map<string, string | undefined>([...sources.entries()].map(([k, v]) => [k, v] as const));
+  return {
+    root: repoRoot,
+    files: records.map((r) => r.relPath),
+    extractions: new Map(records.map((r) => [r.relPath, r.extraction] as const)),
+    readFile(relPath: string): string | undefined {
+      if (cache.has(relPath)) return cache.get(relPath);
+      let text: string | undefined;
+      const abs = resolvePath(rootAbs, relPath);
+      if (abs.startsWith(rootAbs + sep)) {
+        try {
+          text = readFileSync(abs, "utf8");
+        } catch {
+          text = undefined;
+        }
+      }
+      cache.set(relPath, text);
+      return text;
+    },
+  };
 }
 
 /** dangerouslyCalls folding: sinks aggregated per node id → { name, count } sorted by name. */
@@ -108,6 +136,7 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
     // pack lands in the store, so a mid-pack failure leaves no partial nodes.
     try {
       const records: FilePass[] = [];
+      const sources = new Map<string, string>();
       for (const relPath of files) {
         let source: string;
         try {
@@ -119,12 +148,17 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
           notes.push(`file skipped: ${relPath} (${error instanceof Error ? error.message : String(error)})`);
           continue;
         }
+        sources.set(relPath, source);
         records.push({ relPath, extraction: pack.extract(parse(source), relPath, source) });
       }
       if (records.length === 0) {
         continue; // every file was unreadable — notes carry why; no empty language entry
       }
       for (const { relPath } of records) walked.add(relPath);
+
+      // wave-2 opening (design D1): the pack's optional resolver, built from a
+      // ctx over THIS pack's readable files; undefined keeps phase 2 untouched
+      const resolver = pack.createResolver?.(makeCtx(repoRoot, records, sources));
 
       // sinks fold into node dangerousCalls BEFORE the nodes land in the store
       const dangerous = foldSinks(records);
@@ -182,14 +216,41 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
       }
       for (const edge of pendingImports) store.addEdge(edge);
 
+      // resolver-contributed File→File imports (design D1): walked-only, deduped,
+      // deterministic order; inferred like every pack-derived edge
+      const resolverImports = resolver?.fileImports?.() ?? [];
+      const seenResolverImports = new Set<string>();
+      for (const imp of [...resolverImports].sort((a, b) =>
+        a.fromRelPath + "\0" + a.targetRelPath < b.fromRelPath + "\0" + b.targetRelPath ? -1 : 1,
+      )) {
+        if (!walked.has(imp.fromRelPath) || !walked.has(imp.targetRelPath)) continue;
+        const key = imp.fromRelPath + "\0" + imp.targetRelPath;
+        if (seenResolverImports.has(key)) continue;
+        seenResolverImports.add(key);
+        store.addEdge({
+          kind: "imports",
+          from: makeNodeId("File", imp.fromRelPath),
+          to: makeNodeId("File", imp.targetRelPath),
+          inferred: true,
+        });
+      }
+
       // phase 2: resolve every externalRef over the walked set — or keep it as an
       // unresolved edge named by the exact expression text (never dropped)
-      const resolveOne = (ref: ExternalCallRef, relPath: string): string | undefined =>
-        resolveRef(pack, ref, relPath, store, classFiles, importTargetsOf, closureOf, walked);
+      const resolveOne = (ref: ExternalCallRef, relPath: string): string | undefined => {
+        // hook FIRST (design D1): a returned id must exist in the store — a
+        // fabricated id falls through to the flags exactly like a miss
+        const hooked = resolver?.resolveRef(ref, relPath);
+        if (hooked !== undefined) {
+          return store.getNode(hooked) !== undefined ? hooked : undefined;
+        }
+        return resolveRef(pack, ref, relPath, store, classFiles, importTargetsOf, closureOf, walked);
+      };
 
       let sameFileResolved = 0;
       let externalNoRef = 0;
       let phase2Resolved = 0;
+      let externalClassified = 0;
 
       for (const { relPath, extraction } of records) {
         sameFileResolved += extraction.metrics.resolved;
@@ -201,6 +262,9 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
           if (target !== undefined && store.getNode(from) !== undefined) {
             phase2Resolved++;
             store.addEdge({ kind: "calls", from, to: target, inferred: true });
+          } else if (resolver?.isExternalPackage?.(ref, relPath) === true) {
+            // known-external (design Q1 policy A): counted, NO edge, NOT unresolved
+            externalClassified++;
           } else {
             store.addEdge({
               kind: "calls",
@@ -223,12 +287,13 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
         }),
         { callSites: 0, unparseable: 0, sinks: 0 },
       );
+      const refTotal = records.reduce((acc, { extraction }) => acc + extraction.externalRefs.length, 0);
       metrics[pack.id] = {
         files: records.length,
         callSites: totals.callSites,
         resolved: sameFileResolved + phase2Resolved,
-        unresolved: records.reduce((acc, { extraction }) => acc + extraction.externalRefs.length, 0) - phase2Resolved,
-        external: externalNoRef,
+        unresolved: refTotal - phase2Resolved - externalClassified,
+        external: externalNoRef + externalClassified,
         inferred: phase2Resolved,
         unparseable: totals.unparseable,
         dangerousSinks: totals.sinks,

@@ -57,6 +57,41 @@ export interface PackExtraction {
   externalRefs: ExternalCallRef[]; // every unresolved-here call — pipeline resolves or emits an unresolved edge
   sinks: SinkSite[];
   metrics: PackMetrics;
+  // package-level imports (go: import paths) — consumed by the pack's own
+  // resolver hook, never by the pipeline's flag machinery (design D1)
+  readonly packageImports?: readonly PackageImport[];
+}
+
+/** A package-level import the pack extracted (go: `import "github.com/x/y/pkg"`). */
+export interface PackageImport {
+  readonly alias: string; // local alias (go: explicit name, else the path's last segment)
+  readonly path: string; // the raw import path as written
+}
+
+/**
+ * Whole-repo context handed to a pack's resolver hook (design D1). Built once
+ * per pack from that pack's READABLE walked files; `readFile` reads any repo-
+ * relative path (cached; undefined when unreadable or outside the root) so
+ * resolvers can consult manifest files (go.mod) the walker never indexed.
+ */
+export interface PackResolveCtx {
+  readonly root: string;
+  readonly files: readonly string[]; // this pack's readable walked relPaths
+  readonly extractions: ReadonlyMap<string, PackExtraction>;
+  readFile(relPath: string): string | undefined;
+}
+
+/**
+ * Optional per-pack phase-2 resolver (design D1, the ruled Wave-2 opening).
+ * `resolveRef` returns a node id the pipeline GUARDS against the store —
+ * fabricated ids fall through exactly like an unresolved ref. `isExternalPackage`
+ * classifies a ref as known-external (metrics.external, NO edge, not unresolved).
+ * `fileImports` contributes File→File imports edges (inferred, deduped, sorted).
+ */
+export interface PackRefResolver {
+  resolveRef(ref: ExternalCallRef, fromRelPath: string): string | undefined;
+  isExternalPackage?(ref: ExternalCallRef, fromRelPath: string): boolean;
+  fileImports?(): readonly { fromRelPath: string; targetRelPath: string }[];
 }
 
 export interface LanguagePack {
@@ -68,4 +103,7 @@ export interface LanguagePack {
   readonly resolution: { moduleAliases: boolean; classIndex: boolean; includeClosure: boolean };
   readonly sinks: readonly SinkSpec[]; // the pack's dangerous-function table (data)
   extract(root: SyntaxNode, relPath: string, source: string): PackExtraction;
+  /** Wave-2 opening (design D1): optional whole-repo resolver, tried BEFORE the
+   *  flag machinery. Undefined (wave-1 packs) keeps the pipeline bit-identical. */
+  readonly createResolver?: (ctx: PackResolveCtx) => PackRefResolver | undefined;
 }
