@@ -16,11 +16,13 @@ import type { EgoNeighbor, WirePair } from "../rpc/index.js";
 import type {
   EgoGraphPayload,
   EgoSourcePayload,
+  FileSourcePayload,
   FileSummary,
   FilesPayload,
   FileSymbolsPayload,
   NodeDetailPayload,
   PaletteSearchPayload,
+  SourceSpan,
   SymbolSummary,
   UnavailablePayload,
 } from "../rpc/index.js";
@@ -130,6 +132,11 @@ const EGO_SIG_CLIP = 48;
 const EGO_SINKS_CAP = 4;
 /** Lines in a lazy egoSource preview — a peek, not a dump. */
 export const EGO_SOURCE_LINES = 10;
+
+/** Lines in a whole-file source window — a readable analysis pane, not an
+ *  unbounded dump; the payload keeps the TRUE totalLines so the footer can
+ *  disclose everything the cap hides. */
+export const FILE_SOURCE_LINES = 2000;
 
 /** Distinct intra-file wire pairs carried on fileSymbols; exact total rides `wiresTotal`. */
 const WIRES_CAP = 120;
@@ -289,6 +296,7 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
   paletteSearch: Handler<PaletteSearchPayload>;
   egoGraph: Handler<EgoGraphPayload>;
   egoSource: Handler<EgoSourcePayload>;
+  fileSource: Handler<FileSourcePayload>;
 } {
   const resolveService =
     "resolve" in services ? (root: string | undefined) => services.resolve(root) : () => services as GraphService;
@@ -439,6 +447,75 @@ export function createRpcHandlers(services: GraphService | GraphServicePool): {
           };
         } catch {
           return { error: "unavailable", message: `source unreadable: ${node.filePath}` };
+        }
+      });
+    },
+
+    /** Whole-file source window (the IDE screen's `s` overlay). The graph is the
+     *  ref index: `file` must be an indexed File node; the optional `ref` adds a
+     *  span anchor when it resolves INSIDE this file (unknown ref or a ref that
+     *  lives elsewhere → span omitted silently, the file still loads). With a
+     *  span the window starts 25 lines before the span start so the symbol is
+     *  on screen; without one it starts at line 1. */
+    async fileSource(input, _ctx): Promise<FileSourcePayload> {
+      const root = optionalStringField(input, "root");
+      if (root === undefined) {
+        return { error: "unavailable", message: "fileSource requires a root — the TUI always sends one" };
+      }
+      return guard(input, async (handle): Promise<FileSourcePayload> => {
+        const file = stringField(input, "file");
+        // path-escape belt FIRST — a caller-supplied path is never even looked
+        // at in the index before it is proven to stay inside the root
+        const rootAbs = resolvePath(root);
+        const abs = resolvePath(root, file);
+        if (abs !== rootAbs && !abs.startsWith(rootAbs + "/")) {
+          return { error: "unavailable", message: `source outside root: ${file}` };
+        }
+        if (handle.store.getNode(`File:${file}`) === undefined) {
+          const needle = file.split("/").pop() ?? file;
+          const suggestions = handle.store
+            .allNodes()
+            .filter((n) => n.kind === "File" && n.filePath.includes(needle))
+            .map((n) => n.qualifiedName)
+            .sort()
+            .slice(0, 5);
+          return { ...provenance(handle), error: "not-found", ambiguous: false, suggestions };
+        }
+        let span: SourceSpan | undefined;
+        let signature: string | undefined;
+        let refEcho: string | undefined;
+        const refInput = optionalStringField(input, "ref");
+        if (refInput !== undefined) {
+          const resolution = resolveRef(handle, refInput);
+          const node = resolution.node;
+          if (node !== undefined && node.filePath === file) {
+            span = { startLine: node.span.start.line, endLine: node.span.end.line };
+            signature = node.signature;
+            refEcho = node.qualifiedName;
+          }
+        }
+        try {
+          const content = await readFile(abs, "utf8");
+          const all = content.split("\n");
+          // a trailing newline is a terminator, not an extra empty line — editors
+          // number it that way, and the window/footer count must match the render
+          if (all.length > 0 && all[all.length - 1] === "") all.pop();
+          const totalLines = all.length;
+          const firstLine = span === undefined ? 1 : Math.max(1, span.startLine - 25);
+          const lines = all.slice(firstLine - 1, firstLine - 1 + FILE_SOURCE_LINES);
+          return {
+            ...provenance(handle),
+            file,
+            lines,
+            firstLine,
+            totalLines,
+            ...(lines.length < totalLines ? { truncated: true as const } : {}),
+            ...(span !== undefined ? { span } : {}),
+            ...(signature !== undefined ? { signature } : {}),
+            ...(refEcho !== undefined ? { ref: refEcho } : {}),
+          };
+        } catch {
+          return { error: "unavailable", message: `source unreadable: ${file}` };
         }
       });
     },

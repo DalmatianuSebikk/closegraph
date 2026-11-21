@@ -126,6 +126,31 @@ export type PaletteSearchPayload = (Provenance & { matches: PaletteMatch[] }) | 
 export type EgoGraphPayload = EgoGraphData | NotFoundPayload | UnavailablePayload;
 export type EgoSourcePayload = EgoSourceData | NotFoundPayload | UnavailablePayload;
 
+/** 1-based inclusive line range of the anchor symbol inside a source window. */
+export interface SourceSpan {
+  startLine: number;
+  endLine: number;
+}
+
+/** Whole-file source window: `lines` is the rendered window (firstLine-anchored,
+ *  capped), `totalLines` the true file length — so the footer always discloses
+ *  what is hidden. `span` marks the requested symbol when the ref resolves in
+ *  this file; an unknown ref omits the span but still returns the file. */
+export type FileSourcePayload =
+  | (Provenance & {
+      file: string;
+      lines: string[];
+      firstLine: number;
+      totalLines: number;
+      /** present only when the cap dropped lines */
+      truncated?: true;
+      span?: SourceSpan;
+      signature?: string;
+      ref?: string;
+    })
+  | NotFoundPayload
+  | UnavailablePayload;
+
 const object = { type: "object" } as const;
 
 /** Optional per-call graph root (shared services): the TUI sends its own
@@ -141,6 +166,15 @@ export const closegraphRpc = {
       input: {
         type: "object",
         properties: { file: { type: "string" }, ...rootProperty },
+        required: ["file"],
+        additionalProperties: false,
+      },
+      output: object,
+    },
+    fileSource: {
+      input: {
+        type: "object",
+        properties: { file: { type: "string" }, ref: { type: "string" }, ...rootProperty },
         required: ["file"],
         additionalProperties: false,
       },
