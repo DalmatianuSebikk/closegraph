@@ -1015,6 +1015,10 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       egoGraph: egoGraphViaRpc(context.client, sessionRoot),
       nodeDetail: nodeDetailViaRpc(context.client, sessionRoot),
       egoSource: egoSourceViaRpc(context.client, sessionRoot),
+      // file-entry: the same rpc helpers the classic screen uses feed the
+      // entry model's file list + symbol cards (bare /closegraph depends on them).
+      files: filesViaRpc(context.client, sessionRoot),
+      fileSymbols: fileSymbolsViaRpc(context.client, sessionRoot),
       // Task 3: the agent bridge dep. The repaint hops one macrotask past the
       // promise settlement so the MODEL's own resolution handler (a microtask
       // on this same promise) has stored the cache entry before sync() reads it.
