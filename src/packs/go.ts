@@ -4,12 +4,13 @@
  * EXTRACTION semantics (this file, pinned by tests/packs/go.test.ts):
  *   nodes      `function_declaration` → Function; `method_declaration` →
  *              Function `Type.method` (receiver type text, leading `*`
- *              stripped); `type_spec` over `struct_type`/`interface_type` →
- *              Class; interface `method_elem` → Function `Iface.method`.
- *              Non-struct/interface type specs (aliases, `type MyInt int`)
- *              emit NO node in v1. Emission order: File, Classes (with their
- *              interface methods) in source order, then functions/methods in
- *              source order — deterministic, independent of declaration order.
+ *              stripped); EVERY `type_spec` → Class (structs, interfaces,
+ *              aliases like `type Name string` — the resolver needs alias
+ *              Classes to classify in-repo type conversions as external);
+ *              interface `method_elem` → Function `Iface.method`. Emission
+ *              order: File, Classes (with their interface methods) in source
+ *              order, then functions/methods in source order — deterministic,
+ *              independent of declaration order.
  *   exported   Go visibility rule: capitalized first letter.
  *   imports    `import` specs → packageImports (alias = explicit name, else the
  *              path's last segment; dot and blank imports are SKIPPED). Go's
@@ -19,9 +20,15 @@
  *   calls      same-file only: bare `fn()` (top-level functions; methods are
  *              unreachable bare) and `Type.Method` when Type is declared
  *              in-file → calls edges (inferred: true). Selector `x.y()` where
- *              x is an import alias → externalRef {moduleAlias}; other `x.y()`
+ *              x is an import alias → externalRef {moduleAlias}; where x is a
+ *              var with a statically-bound type (receiver var, param `T`/`*T`/
+ *              `pkg.T`, `var x T`, `x := T{}`/`&T{}`/`new(T)`/`pkg.T{}`,
+ *              type assertion `x := y.(T)`) → externalRef through the BOUND
+ *              type (pkg-bound forms carry moduleAlias+className; the resolver
+ *              decides mapped vs external, never extract-time); other `x.y()`
  *              → externalRef {className} (receiver-as-type heuristic, honest
- *              on miss). NEVER dropped.
+ *              on miss). Two-segment identifier.Method only — longer chains
+ *              (a.b.c()) stay the heuristic. NEVER dropped.
  *   sinks      the table below; matched as exact callee text (aliasing a
  *              package to another name evades the match — accepted undercount,
  *              python.ts precedent).
@@ -101,6 +108,7 @@ function buildGoResolver(ctx: PackResolveCtx): PackRefResolver {
   const filesByDir = new Map<string, string[]>(); // dir → sorted walked files
   const topLevel = new Map<string, string[]>(); // top-level fn name → declaring files
   const methods = new Map<string, string[]>(); // `Type.method` → declaring files
+  const classNames = new Set<string>(); // repo-wide Class names (in-repo type conversions)
   const packageOf = new Map<string, string | undefined>(); // file → package clause
 
   const packageClause = (file: string): string | undefined => {
@@ -118,6 +126,10 @@ function buildGoResolver(ctx: PackResolveCtx): PackRefResolver {
     if (siblings === undefined) filesByDir.set(dir, [file]);
     else siblings.push(file); // files iterate sorted → per-dir lists stay sorted
     for (const node of ctx.extractions.get(file)?.nodes ?? []) {
+      if (node.kind === "Class") {
+        classNames.add(node.name);
+        continue;
+      }
       if (node.kind !== "Function") continue;
       const symbolPath = node.qualifiedName.slice(node.qualifiedName.indexOf("#") + 1);
       const index = symbolPath.includes(".") ? methods : topLevel;
@@ -159,17 +171,72 @@ function buildGoResolver(ctx: PackResolveCtx): PackRefResolver {
 
   const idOf = (file: string, symbolPath: string): string => makeNodeId("Function", makeQualifiedName(file, symbolPath));
 
+  // pass 2 — join a constructor-assigned receiver var (`x := New(...)`,
+  // `x := pkg.New(...)`) to the constructor's declared result type via the
+  // extractions' functionResults, then let the normal paths resolve the method
+  // on THAT type. Unknown/untyped/overloaded constructors → undefined (honest).
+  const constructorBinding = (
+    ctor: { name: string; pkg?: string },
+    fromRelPath: string,
+  ): { className: string; moduleAlias?: string } | undefined => {
+    let dir: string | undefined;
+    let pkgName: string | undefined;
+    let moduleAlias: string | undefined;
+    if (ctor.pkg !== undefined) {
+      const imp = (ctx.extractions.get(fromRelPath)?.packageImports ?? []).find((p) => p.alias === ctor.pkg);
+      if (imp === undefined) return undefined;
+      dir = moduleDirOf.get(imp.path);
+      if (dir === undefined) return undefined; // constructor package not in repo
+      const segs = imp.path.split("/").filter(Boolean);
+      pkgName = segs.length > 0 ? segs[segs.length - 1]! : "";
+      moduleAlias = ctor.pkg;
+    } else {
+      dir = dirOf(fromRelPath);
+      pkgName = packageClause(fromRelPath);
+    }
+    const results: string[] = [];
+    for (const f of filesByDir.get(dir) ?? []) {
+      if (packageClause(f) !== pkgName) continue;
+      const rt = ctx.extractions.get(f)?.functionResults?.get(ctor.name);
+      if (rt !== undefined) results.push(rt);
+    }
+    if (results.length !== 1) return undefined; // unknown or ambiguous constructor
+    const t = results[0]!.replace(/^\*/, "");
+    if (!/^[A-Za-z_]\w*$/.test(t)) return undefined; // qualified/complex results stay untyped
+    return moduleAlias !== undefined ? { className: t, moduleAlias } : { className: t };
+  };
+
   const resolveRef = (ref: ExternalCallRef, fromRelPath: string): string | undefined => {
-    // pkg.Fn() — through the from-file's import table and the module map
+    // constructor-typed receiver var: join to the result type, then re-resolve
+    if (ref.constructedBy !== undefined) {
+      const typed = constructorBinding(ref.constructedBy, fromRelPath);
+      if (typed === undefined) return undefined;
+      const synthetic: ExternalCallRef = {
+        fromSymbolPath: ref.fromSymbolPath,
+        functionName: ref.functionName,
+        expressionText: ref.expressionText,
+        className: typed.className,
+        ...(typed.moduleAlias !== undefined ? { moduleAlias: typed.moduleAlias } : {}),
+      };
+      return resolveRef(synthetic, fromRelPath);
+    }
+    // pkg.Fn() / pkg-bound receiver var (`c *http.Client` → c.Get) — through
+    // the from-file's import table and the module map
     if (ref.moduleAlias !== undefined) {
       const imp = (ctx.extractions.get(fromRelPath)?.packageImports ?? []).find((p) => p.alias === ref.moduleAlias);
       if (imp === undefined) return undefined;
       const dir = moduleDirOf.get(imp.path);
       if (dir === undefined) return undefined; // stdlib/third-party — isExternalPackage answers
-      const pkgName = imp.path.split("/").filter(Boolean).pop() ?? "";
-      const files = (filesByDir.get(dir) ?? []).filter(
-        (f) => packageClause(f) === pkgName && (topLevel.get(ref.functionName) ?? []).includes(f),
-      );
+      const segs = imp.path.split("/").filter(Boolean);
+      const pkgName = segs.length > 0 ? segs[segs.length - 1]! : "";
+      const pkgFiles = (filesByDir.get(dir) ?? []).filter((f) => packageClause(f) === pkgName);
+      // pkg.T.Method() — bound receiver var: method on the mapped package's type
+      if (ref.className !== undefined) {
+        const target = `${ref.className}.${ref.functionName}`;
+        const hits = (methods.get(target) ?? []).filter((f) => pkgFiles.includes(f));
+        return hits.length === 1 ? idOf(hits[0]!, target) : undefined;
+      }
+      const files = pkgFiles.filter((f) => (topLevel.get(ref.functionName) ?? []).includes(f));
       return files.length === 1 ? idOf(files[0]!, ref.functionName) : undefined;
     }
     // Type.Method() — same package first (method expressions + receiver-as-type), repo-wide unique second
@@ -180,7 +247,11 @@ function buildGoResolver(ctx: PackResolveCtx): PackRefResolver {
       const fromPkg = packageClause(fromRelPath);
       const local = hits.filter((f) => dirOf(f) === fromDir && packageClause(f) === fromPkg);
       if (local.length > 0) return local.length === 1 ? idOf(local[0]!, target) : undefined;
-      return hits.length === 1 ? idOf(hits[0]!, target) : undefined;
+      // repo-wide fallback: test doubles never shadow production types — when
+      // production and _test.go files both declare the method, prefer production
+      const prod = hits.filter((f) => !f.endsWith("_test.go"));
+      const pool = prod.length > 0 ? prod : hits;
+      return pool.length === 1 ? idOf(pool[0]!, target) : undefined;
     }
     // bare fn() — unique same-dir same-package top-level, self excluded (extractor owns same-file)
     const fromDir = dirOf(fromRelPath);
@@ -198,7 +269,9 @@ function buildGoResolver(ctx: PackResolveCtx): PackRefResolver {
       return !moduleDirOf.has(imp.path); // no in-repo dir → stdlib/third-party
     }
     if (ref.className === undefined && ref.functionName !== "") {
-      return GO_PREDECLARED.has(ref.functionName) || GO_CONVERSIONS.has(ref.functionName);
+      // bare Name("x") where Name is a repo-declared type → conversion, not a
+      // call — external metric, no edge (same treatment as builtin conversions)
+      return GO_PREDECLARED.has(ref.functionName) || GO_CONVERSIONS.has(ref.functionName) || classNames.has(ref.functionName);
     }
     return false; // className misses and dynamic refs stay honest external: edges
   };
@@ -241,6 +314,93 @@ function receiverType(receiverList: Node | null, slice: (n: Node) => string): st
   return slice(typeNode).replace(/^\*+/, "");
 }
 
+/** A var's statically-known type: bare `T` or import-qualified `pkg.T`. */
+type VarBinding = {
+  className?: string;
+  moduleAlias?: string;
+  /** `x := New(...)` / `x := pkg.New(...)` — typed later by the resolver's functionResults join (pass 2). */
+  constructedBy?: { name: string; pkg?: string };
+};
+
+/** single unnamed result `T` / `*T` → text; named results, qualified or
+ * generic types → undefined (the resolver regex-rejects those too — pass 2). */
+function simpleResultText(resultNode: Node, slice: (n: Node) => string): string | undefined {
+  let n: Node = resultNode;
+  let ptr = false;
+  if (n.type === "pointer_type") {
+    const inner = n.namedChildren.find((c): c is Node => c !== null);
+    if (inner === undefined) return undefined;
+    n = inner;
+    ptr = true;
+  }
+  if (n.type !== "type_identifier") return undefined;
+  return `${ptr ? "*" : ""}${slice(n)}`;
+}
+
+/** type node (identifier / pointer / qualified) → binding, or undefined. */
+function bindingOfType(typeNode: Node, slice: (n: Node) => string): VarBinding | undefined {  if (typeNode.type === "pointer_type") {
+    const inner = typeNode.namedChildren.find((c): c is Node => c !== null);
+    return inner === undefined ? undefined : bindingOfType(inner, slice);
+  }
+  if (typeNode.type === "type_identifier") return { className: slice(typeNode) };
+  if (typeNode.type === "qualified_type") {
+    const kids = typeNode.namedChildren.filter((c): c is Node => c !== null);
+    const [pkg, t] = kids;
+    if (pkg === undefined || t === undefined || t.type !== "type_identifier") return undefined;
+    return { moduleAlias: slice(pkg), className: slice(t) };
+  }
+  return undefined;
+}
+
+/** initializer expression → binding: `new(T)`, `&T{}`, `T{}`, `pkg.T{}`, `y.(T)`,
+ * `New(...)`, `pkg.New(...)` (constructor — typed by the resolver, pass 2). */
+function bindingOfExpr(expr: Node, slice: (n: Node) => string): VarBinding | undefined {
+  if (expr.type === "expression_list") {
+    const first = expr.namedChildren.find((c): c is Node => c !== null);
+    return first === undefined ? undefined : bindingOfExpr(first, slice);
+  }
+  if (expr.type === "call_expression") {
+    const fn = expr.childForFieldName("function");
+    if (fn === null) return undefined;
+    if (fn.type === "identifier") {
+      if (slice(fn) !== "new") return { constructedBy: { name: slice(fn) } };
+      // `new(T)`'s argument may sit directly or inside an argument_list wrapper.
+      const args =
+        expr.childForFieldName("arguments") ??
+        expr.namedChildren.find((c): c is Node => c !== null && c.id !== fn.id) ??
+        null;
+      const firstArg =
+        args !== null && args.type === "argument_list"
+          ? (args.namedChildren.find((c): c is Node => c !== null) ?? null)
+          : args;
+      return firstArg === null ? undefined : bindingOfType(firstArg, slice);
+    }
+    if (fn.type === "selector_expression") {
+      // `pkg.New(...)` — pkg must be an import alias at join time; a var operand
+      // (x.New) fails the resolver's import lookup and stays an honest miss
+      const pkg = fn.childForFieldName("operand");
+      const field = fn.childForFieldName("field");
+      if (pkg !== null && pkg.type === "identifier" && field !== null && field.type === "field_identifier") {
+        return { constructedBy: { name: slice(field), pkg: slice(pkg) } };
+      }
+    }
+    return undefined;
+  }
+  if (expr.type === "unary_expression") {
+    const operand = expr.namedChildren.find((c): c is Node => c !== null && c.type !== "operator");
+    return operand === undefined ? undefined : bindingOfExpr(operand, slice);
+  }
+  if (expr.type === "composite_literal") {
+    const typeNode = expr.childForFieldName("type");
+    return typeNode === null ? undefined : bindingOfType(typeNode, slice);
+  }
+  if (expr.type === "type_assertion_expression") {
+    const typeNode = expr.childForFieldName("type");
+    return typeNode === null ? undefined : bindingOfType(typeNode, slice);
+  }
+  return undefined;
+}
+
 class Extractor {
   private readonly nodes: GraphNode[] = [];
   private readonly edges: GraphEdge[] = [];
@@ -257,6 +417,10 @@ class Extractor {
   private readonly classes = new Map<string, { id: string; methods: Map<string, string> }>();
   private readonly importAliases = new Set<string>();
   private readonly edgeKeys = new Set<string>();
+  /** scope (symbolPath, "" = package level) → var name → bound type */
+  private readonly varBindings = new Map<string, Map<string, VarBinding>>();
+  /** top-level function name → declared result type text (pass 2 constructor join). */
+  private readonly functionResults = new Map<string, string>();
 
   constructor(
     private readonly root: Node,
@@ -275,6 +439,7 @@ class Extractor {
     this.emitTypes(decls); // pass 1: Classes (+ interface methods)
     this.emitFunctions(decls); // pass 2: functions + methods, source order
     this.collectImports(decls);
+    this.collectVarBindings(decls); // pass 3: receiver/param/var/type-assertion types (tuning)
     this.walkCalls();
     return {
       nodes: this.nodes,
@@ -282,6 +447,7 @@ class Extractor {
       importTargets: [], // Go: module paths are the resolver's business (D2)
       externalRefs: this.externalRefs,
       ...(this.packageImports.length > 0 ? { packageImports: this.packageImports } : {}),
+      ...(this.functionResults.size > 0 ? { functionResults: this.functionResults } : {}),
       sinks: this.sinks,
       metrics: this.metrics,
     };
@@ -313,8 +479,6 @@ class Extractor {
         const nameNode = spec.childForFieldName("name");
         const typeNode = spec.childForFieldName("type");
         if (nameNode === null || typeNode === null) continue;
-        const kind = typeNode.type;
-        if (kind !== "struct_type" && kind !== "interface_type") continue; // alias/defined types: no node (v1)
         const name = this.slice(nameNode);
         if (subtreeIsBroken(spec)) {
           this.metrics.unparseable++;
@@ -332,7 +496,7 @@ class Extractor {
           exported: isExported(name),
         });
         this.symbolOfNode.set(spec.id, name);
-        if (kind === "interface_type") this.emitInterfaceMethods(typeNode, name, methods);
+        if (typeNode.type === "interface_type") this.emitInterfaceMethods(typeNode, name, methods);
         this.classes.set(name, { id, methods });
       }
     }
@@ -361,6 +525,11 @@ class Extractor {
         const name = this.slice(nameNode);
         const id = this.pushFunction(name, name, decl, isExported(name));
         if (id !== undefined) this.topFns.set(name, id);
+        const resultNode = decl.childForFieldName("result");
+        if (resultNode !== null) {
+          const resultText = simpleResultText(resultNode, this.slice);
+          if (resultText !== undefined) this.functionResults.set(name, resultText);
+        }
       } else if (decl.type === "method_declaration") {
         const nameNode = decl.childForFieldName("name");
         if (nameNode === null) continue;
@@ -460,6 +629,111 @@ class Extractor {
     return "";
   }
 
+  /**
+   * pass 3 — static var→type bindings (tuning from the testify acceptance run;
+   * deterministic, same-file only). Scopes: each function/method body plus one
+   * package-level scope. `h, ok := y.(T)` binds only h (the first name); the
+   * bool stays unbound. Assignments to declared vars are NOT re-bound.
+   */
+  private collectVarBindings(decls: Node[]): void {
+    const scopeOf = (symbolPath: string): Map<string, VarBinding> => {
+      let scope = this.varBindings.get(symbolPath);
+      if (scope === undefined) {
+        scope = new Map();
+        this.varBindings.set(symbolPath, scope);
+      }
+      return scope;
+    };
+    const bindParams = (list: Node | null, scope: Map<string, VarBinding>): void => {
+      if (list === null) return;
+      for (const param of this.named(list.namedChildren)) {
+        if (param.type !== "parameter_declaration") continue;
+        const kids = this.named(param.namedChildren);
+        const typeNode = kids.find((c) => c.type !== "identifier");
+        if (typeNode === undefined) continue; // `(x, y)` — names only, no type
+        const binding = bindingOfType(typeNode, this.slice);
+        if (binding === undefined) continue;
+        for (const nameNode of kids) {
+          if (nameNode.type !== "identifier") continue;
+          scope.set(this.slice(nameNode), binding);
+        }
+      }
+    };
+    for (const decl of decls) {
+      if (decl.type === "var_declaration") {
+        for (const spec of this.named(decl.namedChildren)) {
+          if (spec.type !== "var_spec") continue;
+          const nameNode = spec.childForFieldName("name");
+          if (nameNode === null || nameNode.type !== "identifier") continue;
+          const explicitType = spec.childForFieldName("type");
+          const value = spec.childForFieldName("value");
+          const binding =
+            explicitType !== null
+              ? bindingOfType(explicitType, this.slice)
+              : value !== null
+                ? bindingOfExpr(value, this.slice)
+                : undefined;
+          if (binding !== undefined) scopeOf("").set(this.slice(nameNode), binding);
+        }
+      } else if (decl.type === "method_declaration" || decl.type === "function_declaration") {
+        const symbolPath = this.symbolOfNode.get(decl.id);
+        if (symbolPath === undefined) continue; // dropped as broken
+        const scope = scopeOf(symbolPath);
+        if (decl.type === "method_declaration") {
+          const recvType = receiverType(decl.childForFieldName("receiver"), this.slice);
+          const recvList = decl.childForFieldName("receiver");
+          const param = recvList?.namedChildren.find((c) => c !== null && c.type === "parameter_declaration") ?? null;
+          const nameNode = param?.namedChildren.find((c) => c !== null && c.type === "identifier") ?? null;
+          if (recvType !== undefined && nameNode !== null) {
+            scope.set(this.slice(nameNode), { className: recvType });
+          }
+        }
+        bindParams(decl.childForFieldName("parameters"), scope);
+        const body = decl.childForFieldName("body");
+        if (body === null) continue;
+        this.collectBodyBindings(body, scope);
+      }
+    }
+  }
+
+  /** walk function-body statements for `:=` and inner `var` declarations. */
+  private collectBodyBindings(body: Node, scope: Map<string, VarBinding>): void {
+    const visit = (node: Node): void => {
+      if (node.type === "short_var_declaration") {
+        const left = node.childForFieldName("left");
+        const right = node.childForFieldName("right");
+        const firstName = left?.namedChildren.find((c): c is Node => c !== null && c.type === "identifier");
+        const firstExpr = right?.namedChildren.find((c): c is Node => c !== null);
+        if (firstName !== undefined && firstExpr !== undefined) {
+          const binding = bindingOfExpr(firstExpr, this.slice);
+          if (binding !== undefined) scope.set(this.slice(firstName), binding);
+        }
+      } else if (node.type === "var_declaration") {
+        for (const spec of this.named(node.namedChildren)) {
+          if (spec.type !== "var_spec") continue;
+          const nameNode = spec.childForFieldName("name");
+          if (nameNode === null || nameNode.type !== "identifier") continue;
+          const explicitType = spec.childForFieldName("type");
+          const value = spec.childForFieldName("value");
+          const binding =
+            explicitType !== null
+              ? bindingOfType(explicitType, this.slice)
+              : value !== null
+                ? bindingOfExpr(value, this.slice)
+                : undefined;
+          if (binding !== undefined) scope.set(this.slice(nameNode), binding);
+        }
+      }
+      for (const child of this.named(node.namedChildren)) visit(child);
+    };
+    visit(body);
+  }
+
+  /** scope-aware: enclosing function's bindings, then package-level vars. */
+  private lookupVar(name: string, fromSymbol: string): VarBinding | undefined {
+    return this.varBindings.get(fromSymbol)?.get(name) ?? this.varBindings.get("")?.get(name);
+  }
+
   private callerId(symbolPath: string): string {
     if (symbolPath === "") return this.fileId;
     const cls = this.classes.get(symbolPath);
@@ -507,6 +781,21 @@ class Extractor {
       const y = this.slice(field);
       if (this.importAliases.has(x)) {
         this.pushRef(from, { moduleAlias: x, functionName: y, expressionText }, true);
+        return;
+      }
+      const binding = operand.type === "identifier" ? this.lookupVar(x, from) : undefined;
+      if (binding !== undefined) {
+        this.pushRef(
+          from,
+          {
+            ...(binding.moduleAlias !== undefined ? { moduleAlias: binding.moduleAlias } : {}),
+            ...(binding.className !== undefined ? { className: binding.className } : {}),
+            ...(binding.constructedBy !== undefined ? { constructedBy: binding.constructedBy } : {}),
+            functionName: y,
+            expressionText,
+          },
+          false, // never extract-time external — the resolver decides mapped vs stdlib
+        );
         return;
       }
       const sameFile = this.classes.get(x)?.methods.get(y);

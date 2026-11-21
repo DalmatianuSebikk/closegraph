@@ -48,6 +48,13 @@ export interface ExternalCallRef {
   readonly className?: string; // ClassName::method() — resolved via the pack's class index
   readonly functionName: string; // bare name the pipeline tries against include/source closures
   readonly expressionText: string; // EXACT expression text — becomes the unresolved edge's targetName
+  // go pass 2: the receiver var was assigned from this constructor call in the
+  // same file (`x := New(...)`, `x := pkg.New(...)`) — the resolver joins it to
+  // the constructor's declared result type via functionResults, then resolves
+  // the method on THAT type. Absent everywhere else (wave-1 packs unchanged).
+  // (Named constructedBy — `constructor` would collide with the inherited
+  // Object.prototype.constructor on every plain ref object.)
+  readonly constructedBy?: { readonly name: string; readonly pkg?: string };
 }
 
 export interface PackExtraction {
@@ -60,6 +67,10 @@ export interface PackExtraction {
   // package-level imports (go: import paths) — consumed by the pack's own
   // resolver hook, never by the pipeline's flag machinery (design D1)
   readonly packageImports?: readonly PackageImport[];
+  // go pass 2: top-level function name → declared result type text (single
+  // result only, e.g. "*Assertions") — the resolver joins constructor-assigned
+  // receiver vars to these to type them. Absent in wave-1 packs.
+  readonly functionResults?: ReadonlyMap<string, string>;
 }
 
 /** A package-level import the pack extracted (go: `import "github.com/x/y/pkg"`). */
