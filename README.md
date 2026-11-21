@@ -65,7 +65,7 @@ bun run src/cli.ts <repo> hook uninstall
 ## Numbers
 
 - **81.2%** of intra-project call sites resolved on a real repo (excalidraw) — measured, not vibes
-- **579** tests green · four languages indexed — TypeScript unchanged, plus Python/PHP/bash packs · snapshot reuse + staleness detection · single-flight indexing
+- **738** tests green · five languages indexed — TypeScript unchanged, plus Python/PHP/bash/Go packs · snapshot reuse + staleness detection · single-flight indexing
 
 ## Risk colors (v1 — structural, honest)
 
@@ -80,10 +80,11 @@ has Finding nodes waiting.
 - ✅ Plan 2 — agent tools
 - ✅ Plan 3 — TUI graph view
 - ✅ Plan 4 — agent experience (batch query, report tool, steering, export + hook)
-- ✅ CodeGraph IDE screen — pixel-accurate graph IDE (cards, edges, inspector, honesty rules) + agent round: symbol-picker entry, back button, `?` info overlay, explain, chat sidebar, operations menu
-- ✅ Plan 5 — language packs (Python, PHP, bash shipped; Go/C++/Rust to follow)
+- ✅ Plan 5 — language packs (Python, PHP, bash shipped)
+- ✅ Wave 2 — Go pack (per-pack resolver hook: package scope, go.mod module map, external classification); C++/Rust next
+- ✅ CodeGraph IDE screen — pixel-accurate graph IDE (cards, edges, inspector, honesty rules) + agent round: explain, chat sidebar, operations menu
+- ✅ File-first IDE entry — bare `/closegraph` opens the file list: files by risk → wired symbol cards → focus view
 - ✅ Black-box surface (Round A) — observation ingest + surface query/report tools; Round B TUI view next
 - 🔜 Plan 6 — deterministic rules layer (Finding nodes + reachability)
-- 🔮 Later — black-box attack-surface mode (endpoints/params as graph nodes)
 
 MIT. Bun + pure-JS deps only (ts-morph, OpenTUI, solid-js).
