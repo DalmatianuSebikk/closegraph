@@ -4,7 +4,7 @@
 
 An [OpenCode](https://opencode.ai) plugin that indexes a TypeScript repo into a
 property graph: files, functions, classes, who calls who. Then it gives you a
-**TUI map** to explore it and your **agent four tools** to query it.
+**TUI map** to explore it and your **agent seven tools** to query it.
 
 Built for security review: find what a function touches, what breaks if you
 change it, and where the risky spots are — without hallucinated answers.
@@ -15,8 +15,8 @@ change it, and where the risky spots are — without hallucinated answers.
 
 | Surface | What it does |
 |---|---|
-| `/closegraph` (IDE screen) | Pixel-styled code-graph IDE: function cards wired **callers ← focus → callees** (depth 2, caps always disclosed), sidebar with category filters + minimap, inspector (facts, call relations, risk, sinks), 5-key command bar. Bare `/closegraph` opens the file list — files by risk → their functions as wired cards → focus view |
-| In the IDE screen | `←` / `u` walks focus history · `?` legend + how-it-works · `s` **source window** — the whole file with the selection's lines marked and anchored · `[6]`/`e` **explain this function** (agent-written, labeled as generated, cached) · `t` **chat sidebar** — ask your agent with the focused card attached; `focus <ref>` recenters · `o` **operations menu** — refactor / tests / docs / harden (risk-gated), sent through chat |
+| `/closegraph` (IDE screen) | Pixel-styled code-graph IDE: function cards wired **callers ← focus → callees** (depth 2, caps always disclosed), sidebar with category filters + minimap, inspector (facts, call relations, risk analysis, why-it-matters), 6-key command bar, bordered panels with kind-colored cards. Bare `/closegraph` opens the file list — files by risk → their functions as wired cards → focus view |
+| In the IDE screen | `←` / `u` walks focus history · `?` legend + how-it-works · `s` **source window** — the whole file with the selection's lines marked and anchored · `[6]`/`e` **explain this function** (agent-written, labeled as generated, cached) · `a` **ask bar** — always-visible bottom strip, enter sends your question (with the focused card attached) to the session · `t` **chat sidebar** — transcript + input; `focus <ref>` recenters · `o` **operations menu** — refactor / tests / docs / harden (risk-gated), sent through chat |
 | Classic graph screen | File map with risk shading → symbols → detail → ego graph — still there via the command palette ("Open CodeGraph") |
 | `p` in the TUI | **Jump palette** — fuzzy-ish prefix search, arrows to move, type to filter |
 | Ask-agent | One keypress **injects a prompt about the node** into your session and jumps to chat |
@@ -36,7 +36,7 @@ checker, not guessed by a model. Stale graph? It tells you.
 { "plugins": ["/absolute/path/to/closegraph"] }
 ```
 
-Absolute path required. Then open any TS repo → `/closegraph`.
+Absolute path required. Then open any repo (TypeScript, Python, PHP, bash, Go) → `/closegraph`.
 
 Steer your agent to the graph too: copy the instructions block from
 [`AGENTS-CLOSEGRAPH.md`](./AGENTS-CLOSEGRAPH.md) into the repo's `AGENTS.md` —
@@ -65,7 +65,7 @@ bun run src/cli.ts <repo> hook uninstall
 ## Numbers
 
 - **81.2%** of intra-project call sites resolved on a real repo (excalidraw) — measured, not vibes
-- **745** tests green · five languages indexed — TypeScript unchanged, plus Python/PHP/bash/Go packs (Go: per-pack resolver hook, 77.9% call resolution measured on testify) · snapshot reuse + staleness detection · single-flight indexing
+- **766** tests green · five languages indexed — TypeScript unchanged, plus Python/PHP/bash/Go packs (Go: per-pack resolver hook, 77.9% call resolution measured on testify) · snapshot reuse + staleness detection · single-flight indexing
 
 ## Risk colors (v1 — structural, honest)
 
