@@ -1426,7 +1426,12 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         m.dispatch(action)
         sync()
         // entry opens/refreshes load async (whenEntrySettled); graph actions
-        // keep the ego settle — settleEntry arms both (Task 5)
+        // keep the ego settle — settleEntry arms both (Task 5). A source
+        // window open (s) reads the WHOLE file — its rpc can outrun every
+        // settle timer, so arm its own settle for the repaint (review #1).
+        void m.whenSourceSettled().then(() => {
+          sync()
+        })
         settleEntry()
         break
       }

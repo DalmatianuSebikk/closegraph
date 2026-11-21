@@ -51,11 +51,15 @@ export function createSourceWindowModel(deps: {
   close(): void;
   move(delta: number): void;
   resize(dims: Dims): void;
+  whenSettled(): Promise<void>;
   state(): SourceWindowState;
 } {
   let dims: Dims = { width: 80, height: 24 };
   let state: SourceWindowState = { status: "closed" };
   let seq = 0;
+  /** the latest open()'s promise — whenSettled() hands it to the route so a
+   *  slow rpc gets a deterministic repaint (the whenEntrySettled family). */
+  let pending: Promise<void> = Promise.resolve();
 
   const visible = () => Math.max(1, dims.height - RESERVED);
   const maxScroll = (rowCount: number) => Math.max(0, rowCount - visible());
@@ -90,11 +94,13 @@ export function createSourceWindowModel(deps: {
   }
 
   return {
-    /** Fires the fetch and forgets it; a settle only lands if it is the newest. */
+    /** Fires the fetch and forgets it; a settle only lands if it is the newest.
+     *  Resolves even when the settle was superseded — whenSettled() means "this
+     *  call finished", not "its state applied". */
     open(file: string, ref?: string): void {
       const mySeq = ++seq;
       state = { status: "loading", file };
-      deps
+      pending = deps
         .fileSource({ file, ...(ref !== undefined ? { ref } : {}) })
         .then((p) => {
           if (seq !== mySeq) return;
@@ -108,6 +114,12 @@ export function createSourceWindowModel(deps: {
           if (seq !== mySeq) return;
           state = { status: "error", file, message: err instanceof Error ? err.message : String(err) };
         });
+    },
+
+    /** Resolves when the latest open() has settled (open without an in-flight
+     *  call resolves immediately) — the route's repaint hook. */
+    whenSettled(): Promise<void> {
+      return pending;
     },
 
     /** Closes now and invalidates any in-flight settle. */

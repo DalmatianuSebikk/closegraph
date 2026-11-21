@@ -2004,6 +2004,12 @@ export function createIdeModel(deps: {
     // back; open/scroll live in dispatch. state().sourceWin carries the render.
     closeSource,
 
+    /** Resolves when the latest source-window open settled — the route's
+     *  deterministic repaint hook (whenEntrySettled family). */
+    whenSourceSettled(): Promise<void> {
+      return sourceWin.whenSettled();
+    },
+
     state,
 
     /** command3 payload for the route to inject via the existing ask-agent path.
