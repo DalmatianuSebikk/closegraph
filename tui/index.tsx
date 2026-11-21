@@ -18,7 +18,7 @@ import {
   ASK_ROWS,
   type IdeState,
 } from "../src/view/ide-model.js"
-import { IDE_THEME, categoryOf, riskColor } from "../src/view/ide-theme.js"
+import { IDE_THEME, categoryOf, kindColor, riskColor } from "../src/view/ide-theme.js"
 import {
   buildExplainPrompt,
   extractChatTurns,
@@ -33,12 +33,14 @@ import { reconcileWires } from "../src/view/ide-entry-model.js"
 import type {
   FilesPayload,
   FileSymbolsPayload,
+  FileSourcePayload,
   NodeDetailPayload,
   PaletteSearchPayload,
   EgoGraphPayload,
   EgoSourcePayload,
   UnavailablePayload,
 } from "../rpc/index.js"
+import type { SourceWindowState } from "../src/view/source-window-model.js"
 
 /**
  * CodeGraph graph route (plan 3 Tasks 4+5; ego-graph-view plan Task 5). Thin by
@@ -134,6 +136,20 @@ function egoSourceViaRpc(client: Client, root: string): (ref: string) => Promise
     try {
       const result = await client.rpc.call({ rpcID: "closegraph", method: "egoSource", input: { ref, root } })
       return result.output as EgoSourcePayload
+    } catch (err) {
+      return unavailable(err)
+    }
+  }
+}
+
+function fileSourceViaRpc(
+  client: Client,
+  root: string,
+): (input: { file: string; ref?: string }) => Promise<FileSourcePayload> {
+  return async (input: { file: string; ref?: string }) => {
+    try {
+      const result = await client.rpc.call({ rpcID: "closegraph", method: "fileSource", input: { ...input, root } })
+      return result.output as FileSourcePayload
     } catch (err) {
       return unavailable(err)
     }
@@ -1019,6 +1035,7 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       // entry model's file list + symbol cards (bare /closegraph depends on them).
       files: filesViaRpc(context.client, sessionRoot),
       fileSymbols: fileSymbolsViaRpc(context.client, sessionRoot),
+      fileSource: fileSourceViaRpc(context.client, sessionRoot),
       // Task 3: the agent bridge dep. The repaint hops one macrotask past the
       // promise settlement so the MODEL's own resolution handler (a microtask
       // on this same promise) has stored the cache entry before sync() reads it.
@@ -1238,6 +1255,22 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
       const action = actionFor(IDE_KEYMAP, key)
       if (action === "help" || action === "back") {
         model().dispatch("help") // help toggles closed
+        sync()
+      }
+      return
+    }
+
+    // source window (s key): topmost overlay after help — while open, j/k and
+    // the arrows scroll the window (the model's dispatch routes them), esc
+    // closes; ALL other keys are swallowed (nothing leaks beneath the window)
+    if (ideState().sourceWin !== undefined) {
+      key.preventDefault()
+      const action = actionFor(IDE_KEYMAP, key)
+      if (action === "back") {
+        model().closeSource()
+        sync()
+      } else if (action === "up" || action === "down") {
+        model().dispatch(action)
         sync()
       }
       return
@@ -1595,6 +1628,64 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
     </box>
   )
 
+  /** Source window (s key): a centered, character-drawn bordered box (D4 —
+   *  never border* props) over the whole screen, like the help/ops overlays.
+   *  The model owns the windowing: `scroll` + rows sliced to the model's own
+   *  visible budget (height − RESERVED) so the clamp the model enforces is the
+   *  clamp the user sees. Line numbers are true file lines; ▸ marks the opened
+   *  ref's span (accent); the footer is the model's honest disclosure line. */
+  const IdeSourceOverlay = (sourceProps: { win: SourceWindowState }) => {
+    const win = sourceProps.win
+    if (win.status === "closed") return [] // never rendered (state omits it while closed) — narrows the union
+    const w = Math.min(dims().width - 4, 90)
+    const pad = Math.max(0, Math.floor((dims().width - w) / 2))
+    const titleText =
+      win.status === "ready"
+        ? `${win.file} · ${win.totalLines} lines${
+            win.span !== undefined && win.ref !== undefined ? ` · ${win.ref.slice(win.ref.lastIndexOf("#") + 1)}` : ""
+          }`
+        : ` ${win.file} `
+    const title = ` ${titleText.slice(0, Math.max(1, w - 6))} `
+    const top = `╭${title}${"─".repeat(Math.max(0, w - 2 - title.length))}╮`
+    const bottom = `╰${"─".repeat(Math.max(0, w - 2))}╯`
+    const bordered = (content: string): string => `│${(content + " ".repeat(Math.max(0, w - 2))).slice(0, Math.max(0, w - 2))}│`
+    const accent = kindColor("Function")
+    const bodyCount = Math.max(1, dims().height - 6) // mirrors the model's visible budget
+    const lines: { text: string; fg?: string }[] = []
+    if (win.status === "loading") {
+      lines.push({ text: bordered(`loading ${win.file}…`), fg: IDE_THEME.textMuted })
+    } else if (win.status === "error") {
+      lines.push({ text: bordered(win.message), fg: riskColor("high") })
+    } else {
+      for (const row of win.rows.slice(win.scroll, win.scroll + bodyCount)) {
+        lines.push({
+          text: bordered(`${String(row.n).padStart(5)} ${row.inSpan ? "▸" : " "} ${row.text}`),
+          ...(row.inSpan ? { fg: accent } : {}),
+        })
+      }
+    }
+    return (
+      <box flexDirection="column" width="100%" height="100%" paddingLeft={pad}>
+        <box flexDirection="column" width={w} backgroundColor={IDE_THEME.panel}>
+          <text width={w} height={1} flexShrink={0} fg={IDE_THEME.border}>
+            {top}
+          </text>
+          {...lines.map((line) => (
+            <text width={w} height={1} flexShrink={0} fg={line.fg}>
+              {line.text}
+            </text>
+          ))}
+          <text width={w} height={1} flexShrink={0} fg={IDE_THEME.border}>
+            {bottom}
+          </text>
+          <text width={w} height={1} flexShrink={0} fg={IDE_THEME.textMuted}>
+            {win.status === "ready" ? win.footer : "j/k scroll · esc close"}
+          </text>
+        </box>
+      </box>
+    )
+  }
+
   const HeaderView = (headerProps: { s: IdeState }) => (
     <box flexDirection="column" height={HEADER_ROWS} flexShrink={0} backgroundColor={IDE_THEME.panel}>
       <box flexDirection="row" height={1} flexShrink={0}>
@@ -1905,6 +1996,10 @@ function CodegraphIdeRoute(props: { initialRef?: string }) {
         // Task 5: the ops overlay is a full-screen overlay alongside help — it
         // swallows keys and screen while open (the route branch above)
         if (s.ops !== undefined) return <IdeOpsOverlay ops={s.ops} focusRef={s.focusRef} />
+        // Source window (s key): the same full-screen overlay family — the
+        // model's window state drives every rendered row (honest footer, span
+        // anchor, caps); esc closes (route capture branch above)
+        if (s.sourceWin !== undefined) return <IdeSourceOverlay win={s.sourceWin} />
         // Task 4: an open chat rides the inspector-overlay path in the narrow
         // modes — it REPLACES the canvas (the model's `chat replaces canvas`
         // note family), never squeezes a <40-col viewport. In full/no-sidebar

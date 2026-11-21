@@ -32,6 +32,9 @@ export type SourceWindowState =
       totalLines: number;
       truncated: boolean;
       span?: SourceSpan;
+      /** the ref the window was opened for, echoed when its span resolved —
+       *  the route's title shows its short name */
+      ref?: string;
       rows: SourceRow[];
       anchorRow: number;
       scroll: number;
@@ -78,6 +81,7 @@ export function createSourceWindowModel(deps: {
       totalLines: p.totalLines,
       truncated: p.truncated === true,
       ...(span !== undefined ? { span } : {}),
+      ...(span !== undefined && p.ref !== undefined ? { ref: p.ref } : {}),
       rows,
       anchorRow,
       scroll: anchorRow,
