@@ -36,6 +36,7 @@ import type {
   EgoGraphPayload,
   EgoNeighbor,
   EgoSourcePayload,
+  FileSourcePayload,
   FileSymbolsPayload,
   FilesPayload,
   NodeDetail,
@@ -43,6 +44,7 @@ import type {
 } from "../../rpc/index.js";
 import type { GraphNode } from "../graph/types.js";
 import { renderMatches } from "../tools/resolve-ref.js";
+import { createSourceWindowModel, type SourceWindowState } from "./source-window-model.js";
 import { bannerNone, bannerUnavailable, bannerUnknownFreshness, type Banner } from "./banner.js";
 import {
   buildChatContextPrefix,
@@ -91,14 +93,14 @@ export type IdeAction =
   | "depthUp" | "depthDown" | "fit" | "center" | "toggleInspector" | "toggleMinimap" | "toggleSidebar"
   | "help" | "back" | "backCenter" | "refresh"
   | "command1" | "command2" | "command3" | "command4" | "command5" | "command6"
-  | "explain" | "chat" | "ops" | "ask";
+  | "explain" | "chat" | "ops" | "ask" | "source";
 
 export const IDE_ACTIONS: readonly IdeAction[] = [
   "left", "right", "up", "down", "open", "collapse", "cyclePanel", "search",
   "depthUp", "depthDown", "fit", "center", "toggleInspector", "toggleMinimap", "toggleSidebar",
   "help", "back", "backCenter", "refresh",
   "command1", "command2", "command3", "command4", "command5", "command6",
-  "explain", "chat", "ops", "ask",
+  "explain", "chat", "ops", "ask", "source",
 ];
 
 export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
@@ -141,6 +143,9 @@ export const IDE_KEYMAP: Record<IdeAction, readonly string[]> = {
    *  transcript beside it); while focused the route captures keys palette-style
    *  (printables type, enter submits, esc blurs — the draft is kept). */
   ask: ["a"],
+  /** s: full-file source window over the current selection (span marked +
+   *  anchored). While open j/k/up/down scroll the window and esc closes it. */
+  source: ["s"],
 };
 
 export interface InspectorSection {
@@ -189,6 +194,10 @@ export interface IdeState {
   /** Present while the entry screens own the view (bare /closegraph): the
    *  file-list / file-view state machine (Task 4 file-entry). */
   entry?: EntryState;
+  /** Source window (s key): present while open. `rows` are the visible-slice
+   *  lines with the opened ref's span marked; the window anchors ~2 lines
+   *  above the span start; esc closes (never a payload swap survivor). */
+  sourceWin?: SourceWindowState;
   selectedRef?: string;
   focusRef: string;
   depth: number;
@@ -214,7 +223,11 @@ const RING2_FAIL_NOTE = "ring 2 unavailable — neighbor fetches failed";
 
 /** Pinned command-bar note for the entry screens (file-list / file-view): the
  *  command bar carries no graph actions there — the hint is the whole bar. */
-const ENTRY_HINT_NOTE = "enter open · j/k move · r refresh · t chat · / search · ? help";
+const ENTRY_HINT_NOTE = "enter open · j/k move · r refresh · t chat · / search · s source · ? help";
+
+/** Fallback payload message when the route wired no source rpc (never in
+ *  practice — the window degrades to an honest error state, never a crash). */
+const SOURCE_RPC_UNAVAILABLE = "graph unavailable — source rpc not wired";
 
 /** Fallback payload message when the route wired no file rpc (never in practice —
  *  the degradation keeps the entry screens honest instead of crashing). */
@@ -260,7 +273,7 @@ const HELP_KEYS_LINES: readonly string[] = [
   "[b] sidebar  [i] inspector  [m] minimap  [+/-] depth  [/] search",
   "[1] trace callers  [2] source  [3] ask agent  [4] depth+  [5] expand",
   "[6] explain  [e] explain  [o] operations  [a] ask bar  [t] chat · \"focus <ref>\" recenters",
-  "[r] refresh  [esc] back, closes at root  [?] close help",
+  "[r] refresh  [esc] back, closes at root  [?] close help  [s] source window",
 ];
 
 /** `?` overlay sections — wording pinned (Task 2). Legend uses theme color NAMES
@@ -300,6 +313,12 @@ function modeFor(width: number): IdeMode {
 export const MAX_DEPTH = 2;
 /** Total REAL (non-placeholder) cards across ALL columns at depth 2 (center + ring 1 + ring 2). */
 export const NODE_BUDGET = 40;
+
+/** File part of a ref ("src/a.ts#fn" → "src/a.ts"; a file-less ref is its own file). */
+function refFile(ref: string): string {
+  const hash = ref.lastIndexOf("#");
+  return hash === -1 ? ref : ref.slice(0, hash);
+}
 
 /** Symbol tail of a qualifiedName (the ref's identifying part). */
 function shortName(ref: string): string {
@@ -407,6 +426,9 @@ export function createIdeModel(deps: {
    *  absent deps degrade to the unavailable banner, never a crash. */
   files?: () => Promise<FilesPayload>;
   fileSymbols?: (file: string) => Promise<FileSymbolsPayload>;
+  /** Source window (s key): whole-file payload with the ref's span. Optional —
+   *  absent dep degrades to an error window with the wired-family note. */
+  fileSource?: (input: { file: string; ref?: string }) => Promise<FileSourcePayload>;
 }) {
   let dims: Dims = { ...DEFAULT_DIMS };
   let focusRef = deps.ref;
@@ -498,6 +520,13 @@ export function createIdeModel(deps: {
   // (the route's onMount load() would also land here, but the entry screens must
   // not depend on it). A real <ref> never touches the file rpc.
   if (deps.ref === "") entryPending = entry.load();
+
+  /** Source window (s key): ONE composed model, same lifetime as the view —
+   *  the missing-dep wrapper keeps open() honest instead of crashing. */
+  const sourceWin = createSourceWindowModel({
+    fileSource: deps.fileSource ?? (async () => ({ error: "unavailable" as const, message: SOURCE_RPC_UNAVAILABLE })),
+  });
+  let sourceWinOpen = false;
 
   function viewportHeight(): number {
     return Math.max(1, dims.height - HEADER_ROWS - COMMAND_ROWS - ASK_ROWS);
@@ -675,6 +704,8 @@ export function createIdeModel(deps: {
     ring2 = undefined; // …dropping the ring-2 columns…
     ring2Cache.clear(); // …and the per-ref neighbor cache with them
     ops = undefined; // …and the ops overlay — its items were gated on the OLD focus's risk facts
+    sourceWinOpen = false; // …and the source window — its span anchors the OLD selection
+    sourceWin.close();
     if ("error" in payload) {
       data = undefined;
       columns = [];
@@ -1139,6 +1170,40 @@ export function createIdeModel(deps: {
     });
   }
 
+  /** s: open the full-file source window on the current target — the entry
+   *  screens use their own selection (file-view card / list file); the graph
+   *  uses the selected card, falling back to the focus. No real target (or a
+   *  synthetic one) gets the honest unavailable note, never a window. */
+  function openSource(): void {
+    let input: { file: string; ref?: string } | undefined;
+    if (onEntry) {
+      const es = entry.state();
+      if (es.screen === "file-view") {
+        const card = entry.selectedCard();
+        if (card !== undefined) input = { file: refFile(card.ref), ref: card.ref };
+      } else {
+        const file = entry.selectedFile();
+        if (file !== undefined) input = { file };
+      }
+    } else {
+      const sel = selectedRef();
+      if (sel !== undefined && !isSynthetic(sel)) input = { file: refFile(sel), ref: sel };
+      else if (focusRef !== "" && !isSynthetic(focusRef)) input = { file: refFile(focusRef), ref: focusRef };
+    }
+    if (input === undefined) {
+      actionNote = "source unavailable";
+      return;
+    }
+    sourceWinOpen = true;
+    void sourceWin.open(input.file, input.ref);
+  }
+
+  /** Route esc path: close the window (the model's own state stays discarded). */
+  function closeSource(): void {
+    sourceWinOpen = false;
+    sourceWin.close();
+  }
+
   /** Center risk facts in the exact shape askAgentPrompt() collects them (focus
    *  ref + risk + sinks) — the explain path reuses this instead of duplicating. */
   function centerRiskContext(): { riskReason?: string; sinks?: { name: string; count: number }[] } {
@@ -1562,6 +1627,7 @@ export function createIdeModel(deps: {
       ...(helpOpen ? { help: HELP_SECTIONS.map((s) => ({ title: s.title, lines: [...s.lines] })) } : {}),
       ...(chatOpen ? { chat: chatState() } : {}),
       ...(ops !== undefined ? { ops: { items: ops.items.map((i) => ({ ...i })), cursor: ops.cursor } } : {}),
+      ...(sourceWinOpen ? { sourceWin: sourceWin.state() } : {}),
       ask: { focused: askFocused, input: chatInput, status: chatStatus },
       focusRef,
       depth,
@@ -1720,6 +1786,7 @@ export function createIdeModel(deps: {
       if (next.width === dims.width && next.height === dims.height) return;
       dims = { ...next };
       entry.resize({ ...next }); // the entry screens re-window too
+      sourceWin.resize({ ...next }); // the source window re-clamps its scroll
       if (data !== undefined) {
         for (const [col, row] of Object.entries(columnRows)) {
           columnRows[Number(col)] = Math.min(row, Math.max(0, (columns[Number(col)]?.cards.length ?? 1) - 1));
@@ -1730,6 +1797,12 @@ export function createIdeModel(deps: {
     },
 
     dispatch(action: IdeAction): void {
+      // An open source window eats the vertical keys first (j/k scroll the
+      // window, never the cards/rows beneath) — on every screen.
+      if (sourceWinOpen && (action === "up" || action === "down")) {
+        sourceWin.move(action === "up" ? -1 : 1);
+        return;
+      }
       // Entry screens route first: movement/open/refresh + the shared overlays
       // (help/chat/ask). Graph-only commands are honest no-ops there — the hint
       // note is the whole command bar.
@@ -1761,6 +1834,9 @@ export function createIdeModel(deps: {
               chatOpen = true;
               chatScrollPos = 0;
             }
+            return;
+          case "source":
+            if (!sourceWinOpen) openSource(); // s while open: no-op (j/k scroll)
             return;
           default:
             return; // search: the route opens the palette over the entry screen
@@ -1862,6 +1938,9 @@ export function createIdeModel(deps: {
             chatScrollPos = 0;
           }
           break;
+        case "source":
+          if (!sourceWinOpen) openSource(); // s while open: no-op (j/k scroll)
+          break;
       }
     },
 
@@ -1919,6 +1998,16 @@ export function createIdeModel(deps: {
     // and submit ride the chat family (chatType/chatBackspace/chatSubmit).
     askBlur(): void {
       askFocused = false;
+    },
+
+    // Source window (s key): the route's esc chain closes it before walking
+    // back; open/scroll live in dispatch. state().sourceWin carries the render.
+    closeSource,
+
+    /** Resolves when the latest source-window open settled — the route's
+     *  deterministic repaint hook (whenEntrySettled family). */
+    whenSourceSettled(): Promise<void> {
+      return sourceWin.whenSettled();
     },
 
     state,
