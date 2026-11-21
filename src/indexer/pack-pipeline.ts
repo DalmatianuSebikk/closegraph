@@ -217,8 +217,14 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
       for (const edge of pendingImports) store.addEdge(edge);
 
       // resolver-contributed File→File imports (design D1): walked-only, deduped,
-      // deterministic order; inferred like every pack-derived edge
-      const resolverImports = resolver?.fileImports?.() ?? [];
+      // deterministic order; inferred like every pack-derived edge. A throwing
+      // fileImports contributes nothing — it never fails the pack (final review #1).
+      let resolverImports: readonly { fromRelPath: string; targetRelPath: string }[] = [];
+      try {
+        resolverImports = resolver?.fileImports?.() ?? [];
+      } catch {
+        resolverImports = [];
+      }
       const seenResolverImports = new Set<string>();
       for (const imp of [...resolverImports].sort((a, b) =>
         a.fromRelPath + "\0" + a.targetRelPath < b.fromRelPath + "\0" + b.targetRelPath ? -1 : 1,
@@ -238,13 +244,29 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
       // phase 2: resolve every externalRef over the walked set — or keep it as an
       // unresolved edge named by the exact expression text (never dropped)
       const resolveOne = (ref: ExternalCallRef, relPath: string): string | undefined => {
-        // hook FIRST (design D1): a returned id must exist in the store — a
-        // fabricated id falls through to the flags exactly like a miss
-        const hooked = resolver?.resolveRef(ref, relPath);
+        // hook FIRST. A returned id must exist in the store — a fabricated id
+        // yields undefined WITHOUT consulting the flags. Order is hook → flags
+        // → external classification, so a repo-declared fn shadowing a builtin
+        // resolves before the external classifier can claim it (pinned in
+        // go-resolver tests). A throwing hook is a per-ref miss, never a pack
+        // failure (final review #1).
+        let hooked: string | undefined;
+        try {
+          hooked = resolver?.resolveRef(ref, relPath);
+        } catch {
+          hooked = undefined;
+        }
         if (hooked !== undefined) {
           return store.getNode(hooked) !== undefined ? hooked : undefined;
         }
         return resolveRef(pack, ref, relPath, store, classFiles, importTargetsOf, closureOf, walked);
+      };
+      const isExternal = (ref: ExternalCallRef, relPath: string): boolean => {
+        try {
+          return resolver?.isExternalPackage?.(ref, relPath) === true;
+        } catch {
+          return false; // a throwing classifier claims nothing (final review #1)
+        }
       };
 
       let sameFileResolved = 0;
@@ -262,7 +284,7 @@ export async function runPackPasses(repoRoot: string, store: GraphStore, walked:
           if (target !== undefined && store.getNode(from) !== undefined) {
             phase2Resolved++;
             store.addEdge({ kind: "calls", from, to: target, inferred: true });
-          } else if (resolver?.isExternalPackage?.(ref, relPath) === true) {
+          } else if (isExternal(ref, relPath)) {
             // known-external (design Q1 policy A): counted, NO edge, NOT unresolved
             externalClassified++;
           } else {

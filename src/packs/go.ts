@@ -270,7 +270,11 @@ function buildGoResolver(ctx: PackResolveCtx): PackRefResolver {
     }
     if (ref.className === undefined && ref.functionName !== "") {
       // bare Name("x") where Name is a repo-declared type → conversion, not a
-      // call — external metric, no edge (same treatment as builtin conversions)
+      // call — external metric, no edge (same treatment as builtin conversions).
+      // Predeclared/conversion names RESOLVE FIRST: a same-package repo fn that
+      // shadows `len` is not external, so the classifier and resolveRef stay
+      // self-consistent regardless of which one the pipeline consults first.
+      if (resolveRef(ref, fromRelPath) !== undefined) return false;
       return GO_PREDECLARED.has(ref.functionName) || GO_CONVERSIONS.has(ref.functionName) || classNames.has(ref.functionName);
     }
     return false; // className misses and dynamic refs stay honest external: edges

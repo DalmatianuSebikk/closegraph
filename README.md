@@ -65,7 +65,7 @@ bun run src/cli.ts <repo> hook uninstall
 ## Numbers
 
 - **81.2%** of intra-project call sites resolved on a real repo (excalidraw) — measured, not vibes
-- **738** tests green · five languages indexed — TypeScript unchanged, plus Python/PHP/bash/Go packs · snapshot reuse + staleness detection · single-flight indexing
+- **745** tests green · five languages indexed — TypeScript unchanged, plus Python/PHP/bash/Go packs (Go: per-pack resolver hook, 77.9% call resolution measured on testify) · snapshot reuse + staleness detection · single-flight indexing
 
 ## Risk colors (v1 — structural, honest)
 
